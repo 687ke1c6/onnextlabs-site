@@ -1,0 +1,24 @@
+{
+  "name": "onnextlabs-site",
+  "build": { "dockerfile": "Dockerfile" },
+  "forwardPorts": [3000, 5173],
+  "portsAttributes": {
+    "3000": { "label": "axum" },
+    "5173": { "label": "vite" }
+  },
+  "postCreateCommand": "bun install --cwd web",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "bradlc.vscode-tailwindcss",
+        "oven.bun-vscode",
+        "dbaeumer.vscode-eslint",
+        "Anthropic.claude-code",
+        "ms-azuretools.vscode-containers"
+      ],
+      "settings": { "rust-analyzer.check.command": "clippy" }
+    }
+  }
+}
