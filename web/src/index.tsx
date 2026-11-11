@@ -1,6 +1,7 @@
 /* @refresh reload */
 import { render } from "solid-js/web";
+import { RouterProvider } from "@tanstack/solid-router";
 import "./index.css";
-import App from "./App";
+import { router } from "./router";
 
-render(() => <App />, document.getElementById("root")!);
+render(() => <RouterProvider router={router} />, document.getElementById("root")!);

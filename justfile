@@ -17,8 +17,8 @@ dev: install
     set -euo pipefail
     trap 'kill 0' EXIT
     cargo run &
-    bun --cwd web run dev &
-    wait
+    bun run --cwd web dev &
+    wait -n  # if either server exits (e.g. port in use), stop both
 
 # run only the axum server
 server:
@@ -26,11 +26,11 @@ server:
 
 # run only the vite dev server
 web:
-    bun --cwd web run dev
+    bun run --cwd web dev
 
 # build frontend and release binary
 build: install
-    bun --cwd web run build
+    bun run --cwd web build
     cargo build --release
 
 # build everything, then serve web/dist from the release binary

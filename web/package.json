@@ -10,6 +10,8 @@
     "preview": "bun --bun vite preview"
   },
   "dependencies": {
+    "@tanstack/solid-router": "^1.170.43",
+    "altcha": "3.5.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "solid-js": "^1.9.0",

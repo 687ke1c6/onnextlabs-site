@@ -18,6 +18,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs \
     && cargo build --release && rm -rf src target/release/onnextlabs-site*
+COPY migrations migrations
 COPY src src
 RUN touch src/main.rs && cargo build --release
 
@@ -27,7 +28,9 @@ RUN adduser -D -u 10001 app
 WORKDIR /app
 COPY --from=builder /app/target/release/onnextlabs-site /usr/local/bin/onnextlabs-site
 COPY --from=web /app/web/dist ./web/dist
+# SQLite lives here; mount a volume at /app/data to persist it across deploys.
+RUN mkdir -p /app/data && chown app:app /app/data
 USER app
-ENV PORT=3000 STATIC_DIR=/app/web/dist
+ENV PORT=3000 STATIC_DIR=/app/web/dist DB_DIR=/app/data
 EXPOSE 3000
 CMD ["onnextlabs-site"]
