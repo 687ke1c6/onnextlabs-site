@@ -2,6 +2,8 @@ set dotenv-load
 
 image := "onnextlabs-site"
 port := env("PORT", "3000")
+files_user := env("FILES_USER", "dev")
+files_password := env("FILES_PASSWORD", "dev")
 
 # list recipes
 default:
@@ -23,6 +25,11 @@ dev: install
 # run only the axum server
 server:
     cargo run
+
+# serve ./data-dav over WebDAV on :8090, for FILES_URL=http://127.0.0.1:8090/ (README: File storage)
+files:
+    mkdir -p data-dav
+    RCLONE_USER={{quote(files_user)}} RCLONE_PASS={{quote(files_password)}} rclone serve webdav data-dav --addr 127.0.0.1:8090
 
 # run only the vite dev server
 web:

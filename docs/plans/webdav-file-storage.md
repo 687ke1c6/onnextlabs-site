@@ -103,7 +103,13 @@ Done as below, plus:
 - Keep the attachment, `nosniff` and `CSP: sandbox` headers on every response.
 - Tests: unit tests for range parsing; a manual `curl -r` check.
 
-## Step 4: Dev tooling, docs, deployment notes
+## Step 4: Dev tooling, docs, deployment notes ✅
+
+Done as below. The Railway notes use rclone's `RCLONE_USER`/`RCLONE_PASS` variables rather
+than `--user`/`--pass`, so the password isn't in the start command (checked: both work,
+and `--addr [::]:…` answers on IPv4 and IPv6). `just files` checked end to end with the
+`.env.example` values. `just check`, `cargo test` and the web build all pass.
+
 
 - `just files`: runs `rclone serve webdav` on `./data-dav` with a dev user and password.
   The README explains how to point `FILES_URL` at it.
@@ -131,4 +137,5 @@ Done as below, plus:
 - ~~Confirm rclone's behaviour on an interrupted `PUT`.~~ Confirmed (v1.71.2): it keeps the
   truncated file (256 KiB of a 900 KB upload). The temporary-name-then-`MOVE` approach
   handles this.
-- Confirm how Railway's private networking resolves and listens (IPv4 or IPv6).
+- Confirm how Railway's private networking resolves and listens (IPv4 or IPv6). Listening
+  on `[::]` covers both, so this only needs a look at the first deploy.

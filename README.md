@@ -44,8 +44,8 @@ Signing in alone grants nothing. Access comes from:
   permissions they hold themselves in that org. Everyone can see their own roles at
   `/portal/access` (account menu → Your access).
 
-Each organisation's files are stored under `$DATA_DIR/orgs/<slug>/` (documents in
-`documents/`).
+Each organisation's files are stored under `orgs/<slug>/` (documents in `documents/`), on
+local disk or a WebDAV server: see [File storage](#file-storage).
 
 The same can be done on the command line (people must have signed in once to be added):
 ```sh
@@ -57,6 +57,53 @@ onnextlabs-site remove-member world-health-organisation someone@example.com
 onnextlabs-site list-orgs
 onnextlabs-site list-users
 ```
+
+### File storage
+Organisation files are kept in one of two places, chosen at startup (the log says which):
+
+- **Local disk** (the default, `FILES_URL` unset): under `$DATA_DIR/orgs/`.
+- **A WebDAV server** (`FILES_URL` set): a stock [`rclone serve webdav`] on its own volume.
+  The site still decides who may do what; uploads and downloads stream through it.
+
+Either way the layout is the folder tree people see in the portal, so the store can be
+browsed directly: `orgs/<slug>/documents/<folder>/<file>`. Uploads appear under their name
+only once complete (they're written to a hidden `.<name>.partial-…` file first, then
+renamed), and a file is never overwritten. The database keeps each document's details
+(uploader, size, checksum, public flag); folders aren't tracked in it. The design is in
+[ADR 0001](docs/adr/0001-file-storage-over-webdav.md).
+
+| Variable         | Meaning                                                            |
+| ---------------- | ------------------------------------------------------------------ |
+| `FILES_URL`      | WebDAV root, e.g. `http://127.0.0.1:8090/`. Unset = local disk     |
+| `FILES_USER`     | Basic auth user                                                    |
+| `FILES_PASSWORD` | Basic auth password                                                |
+
+To try WebDAV locally, run `just files` (it serves `./data-dav` on `127.0.0.1:8090` as user
+`dev`, password `dev`, or your `FILES_USER`/`FILES_PASSWORD`), then uncomment the `FILES_*`
+lines in `.env` and restart the server. Files already on local disk aren't moved over.
+
+If the WebDAV server is down or rejects the credentials, the site still starts (with a
+warning in the log) and file requests answer `503` until it's back.
+
+#### On Railway
+1. Add a service for the files, from the Docker image `rclone/rclone:1.71.2`, with:
+   - a volume mounted at `/data`;
+   - start command `serve webdav /data --addr [::]:8080`. Listen on `[::]`: Railway's
+     private network can use IPv6 addresses, and `[::]` accepts IPv4 too;
+   - variables `RCLONE_USER` and `RCLONE_PASS` (rclone reads its flags from these, which
+     keeps the password out of the start command);
+   - no public domain. It's only reached over the private network, which is why plain
+     HTTP with Basic auth is acceptable.
+2. On the site, set `FILES_URL=http://${{<files service>.RAILWAY_PRIVATE_DOMAIN}}:8080/`,
+   and `FILES_USER`/`FILES_PASSWORD` to the same credentials.
+3. Back up **both** volumes: the site's (database) and the files service's (files). A
+   restore should use copies taken at about the same time, as the database refers to files.
+
+rclone caches directory listings for 5 minutes (`--dir-cache-time`). That's harmless while
+only the site writes. If people also change files on the volume directly, add
+`--dir-cache-time 10s` (or similar) to the start command.
+
+[`rclone serve webdav`]: https://rclone.org/commands/rclone_serve_webdav/
 
 ## Build & run with Docker
 ```sh
