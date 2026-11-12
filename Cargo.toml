@@ -22,6 +22,7 @@ openidconnect = { version = "4.1.0", default-features = false, features = ["reqw
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 time = "0.3.55"
 tokio-util = { version = "0.7.20", features = ["io"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = true

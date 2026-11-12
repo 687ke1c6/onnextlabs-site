@@ -11,6 +11,7 @@ mod documents;
 mod orgs;
 mod rate_limit;
 mod rbac;
+mod storage;
 mod subscribe;
 mod users;
 
@@ -119,8 +120,8 @@ pub struct AppState {
     db: SqlitePool,
     auth: auth::Auth,
     altcha: altcha::Altcha,
-    /// Root of all stored files (see `Args::data_dir`).
-    data_dir: PathBuf,
+    /// Where org files live (see `storage`).
+    storage: storage::Storage,
     max_upload_bytes: u64,
     limiter: RateLimiter,
     client_ip_header: Option<HeaderName>,
@@ -192,14 +193,16 @@ async fn main() {
     };
 
     let max_upload_bytes = args.max_upload_mb * 1024 * 1024;
-    let data_dir = args.data_dir;
-    if let Err(e) = documents::prepare(&data_dir) {
-        tracing::error!("data dir {}: {e}", data_dir.display());
-        std::process::exit(1);
-    }
+    let storage = match storage::Local::new(args.data_dir.clone()) {
+        Ok(local) => storage::Storage::Local(local),
+        Err(e) => {
+            tracing::error!("data dir {}: {e}", args.data_dir.display());
+            std::process::exit(1);
+        }
+    };
     tracing::info!(
-        "org data stored in {} (max upload {} MB)",
-        data_dir.join("orgs").display(),
+        "org files stored in {} (max upload {} MB)",
+        storage.describe(),
         args.max_upload_mb
     );
 
@@ -208,7 +211,7 @@ async fn main() {
         auth,
         // ~50k SHA-256 hashes worst case: well under a second in a browser.
         altcha: altcha::Altcha::new(altcha_key, 50_000, Duration::from_secs(600)),
-        data_dir,
+        storage,
         max_upload_bytes,
         // Per IP: 5 signups / 10 min. Globally: 60 / min across everyone.
         limiter: RateLimiter::new(
