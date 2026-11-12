@@ -34,7 +34,25 @@ same as WebDAV will. So the `$DATA_DIR/.uploads` staging folder is gone. The int
 - Tests: the existing ones still pass. Add unit tests for the local backend: put,
   no-overwrite, cleanup on error, list.
 
-## Step 2: WebDAV backend
+## Step 2: WebDAV backend ✅
+
+Done as below, except that `GET` doesn't forward `Range` yet: that's step 3, for both
+backends. Notes:
+
+- Uploads stream through a small channel into the `PUT` body, so the multipart field never
+  has to be `'static`. If the upload fails, the `PUT` is aborted (not finished short), and
+  the temporary file is deleted.
+- Redirects are not followed, so the credentials are only ever sent to `FILES_URL`.
+- Status mapping: 404/409 → not found; 401/403/5xx, connection errors and timeouts → 503;
+  anything else → 500.
+- The `PROPFIND` test reply in `src/storage/testdata/` was recorded from rclone v1.71.2.
+- Manual checks against `rclone serve webdav` (2026-11-12), all passed: org creation,
+  upload into nested folders with `#`, `%`, `&`, spaces and non-ASCII names, duplicate-name
+  numbering, listings, download (byte-identical), oversize upload (413, nothing left),
+  upload cut off midway (temporary file deleted), storage down (503 everywhere, a failed
+  org creation is rolled back, startup warns but still starts), wrong password (startup
+  warns with the 401).
+
 
 - Config: `FILES_URL`, `FILES_USER`, `FILES_PASSWORD` (clap/env). With `FILES_URL` set,
   use `WebDav`; otherwise `Local`. Log which one at startup.
@@ -95,6 +113,7 @@ same as WebDAV will. So the `$DATA_DIR/.uploads` staging folder is gone. The int
 
 ## Open items
 
-- Confirm rclone's behaviour on an interrupted `PUT` (step 2). This needs the devcontainer
-  rebuilt with rclone (step 0).
+- ~~Confirm rclone's behaviour on an interrupted `PUT`.~~ Confirmed (v1.71.2): it keeps the
+  truncated file (256 KiB of a 900 KB upload). The temporary-name-then-`MOVE` approach
+  handles this.
 - Confirm how Railway's private networking resolves and listens (IPv4 or IPv6).

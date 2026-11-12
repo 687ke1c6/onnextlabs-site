@@ -23,6 +23,9 @@ axum-extra = { version = "0.12.6", features = ["cookie"] }
 time = "0.3.55"
 tokio-util = { version = "0.7.20", features = ["io"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+quick-xml = "0.37"
+percent-encoding = "2.3.2"
 
 [profile.release]
 lto = true

@@ -1,7 +1,7 @@
 //! Where org files live. One interface over the backends chosen at startup:
 //!
 //! - `Local`: a directory on this machine (`$DATA_DIR`), the default.
-//! - WebDAV (planned; see docs/adr/0001-file-storage-over-webdav.md).
+//! - `WebDav`: a WebDAV server, when `FILES_URL` is set (docs/adr/0001-file-storage-over-webdav.md).
 //!
 //! Paths are `StoragePath`s, relative to the storage root and checked segment by segment,
 //! so nothing here can reach outside the root. What names are *allowed* (no dot-files,
@@ -12,6 +12,7 @@
 //! to its name, never overwriting. Callers `delete` the temporary file if they give up.
 
 mod local;
+mod webdav;
 
 use std::{fmt, io, path::PathBuf};
 
@@ -20,9 +21,11 @@ use futures_util::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
 
 pub use local::Local;
+pub use webdav::WebDav;
 
 pub enum Storage {
     Local(Local),
+    WebDav(WebDav),
 }
 
 /// A file's bytes, ready to send.
@@ -44,7 +47,6 @@ pub enum StorageError {
     /// `commit` target, or a folder in the way, already exists.
     AlreadyExists,
     /// The storage host can't be reached or isn't answering properly.
-    #[allow(dead_code)] // raised by the WebDAV backend (plan step 2)
     Unavailable(String),
     Io(io::Error),
 }
@@ -92,6 +94,7 @@ impl Storage {
     pub async fn list_dirs(&self, dir: &StoragePath) -> Result<Vec<String>, StorageError> {
         match self {
             Storage::Local(s) => s.list_dirs(dir).await,
+            Storage::WebDav(s) => s.list_dirs(dir).await,
         }
     }
 
@@ -99,6 +102,7 @@ impl Storage {
     pub async fn make_dirs(&self, dir: &StoragePath) -> Result<(), StorageError> {
         match self {
             Storage::Local(s) => s.make_dirs(dir).await,
+            Storage::WebDav(s) => s.make_dirs(dir).await,
         }
     }
 
@@ -119,6 +123,7 @@ impl Storage {
             .map_err(|_| StorageError::Io(io::Error::other("bad temporary name")))?;
         match self {
             Storage::Local(s) => s.upload(temp, source, max_bytes).await,
+            Storage::WebDav(s) => s.upload(temp, source, max_bytes).await,
         }
     }
 
@@ -131,18 +136,21 @@ impl Storage {
     ) -> Result<(), StorageError> {
         match self {
             Storage::Local(s) => s.commit(temp, target).await,
+            Storage::WebDav(s) => s.commit(temp, target).await,
         }
     }
 
     pub async fn get(&self, path: &StoragePath) -> Result<Blob, StorageError> {
         match self {
             Storage::Local(s) => s.get(path).await,
+            Storage::WebDav(s) => s.get(path).await,
         }
     }
 
     pub async fn delete(&self, path: &StoragePath) -> Result<(), StorageError> {
         match self {
             Storage::Local(s) => s.delete(path).await,
+            Storage::WebDav(s) => s.delete(path).await,
         }
     }
 
@@ -150,6 +158,15 @@ impl Storage {
     pub fn describe(&self) -> String {
         match self {
             Storage::Local(s) => format!("local directory {}", s.root().display()),
+            Storage::WebDav(s) => format!("WebDAV at {}", s.base()),
+        }
+    }
+
+    /// Whether storage answers at all, for the startup log. Local disk always does.
+    pub async fn check(&self) -> Result<(), StorageError> {
+        match self {
+            Storage::Local(_) => Ok(()),
+            Storage::WebDav(s) => s.check().await,
         }
     }
 }
@@ -245,7 +262,6 @@ impl StoragePath {
             .try_fold(self.clone(), |p, s| p.join(s))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by the WebDAV backend (plan step 2)
     pub fn segments(&self) -> &[String] {
         &self.0
     }

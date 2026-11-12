@@ -107,7 +107,8 @@ Requirements:
   instead, and the docs don't say what an interrupted `PUT` leaves behind. Reports on
   the rclone forum show truncated files surviving dropped uploads in related setups.
   So we assume a cut-off upload **can** leave a partial file, and decision 6 makes that
-  harmless. This is still to be confirmed by a test against real rclone (plan, step 2).
+  harmless. **Confirmed** against rclone v1.71.2 (2026-11-12): an interrupted `PUT` leaves
+  the truncated file under its name.
 - **Railway private networking has used IPv6 internal addresses.** If so, rclone must
   listen on `[::]` (`--addr [::]:8080`). To be confirmed on Railway.
 
