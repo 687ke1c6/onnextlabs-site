@@ -18,8 +18,8 @@ mod users;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
-    http::HeaderName,
     http::StatusCode,
+    http::{Extensions, HeaderMap, HeaderName, Version},
     routing::{any, get, post},
     Json, Router,
 };
@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::signal;
 use tower_http::{
-    compression::CompressionLayer,
+    compression::{predicate::Predicate, CompressionLayer, DefaultPredicate},
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -278,7 +278,13 @@ async fn main() {
         // Unknown API paths get a JSON 404 rather than the SPA's index.html.
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(spa)
-        .layer(CompressionLayer::new())
+        .layer(
+            CompressionLayer::new().compress_when(DefaultPredicate::new().and(
+                |_: StatusCode, _: Version, _: &HeaderMap, ext: &Extensions| {
+                    ext.get::<api::Uncompressed>().is_none()
+                },
+            )),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 

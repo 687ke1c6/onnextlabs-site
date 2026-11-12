@@ -79,7 +79,22 @@ backends. Notes:
     - an oversize upload;
     - storage down.
 
-## Step 3: Range requests on downloads (both backends)
+## Step 3: Range requests on downloads (both backends) ✅
+
+Done as below, plus:
+
+- Downloads send a strong `ETag` (the stored SHA-256). Stored files never change, so
+  `If-Range` is checked in the site against that, and isn't passed on to storage. An
+  `If-Range` date never matches (no `Last-Modified` is sent), so the whole file is sent.
+- Downloads are no longer gzipped: compression would drop `Accept-Ranges`, and ranges
+  count stored bytes. The handler marks its responses (`api::Uncompressed`) and the
+  compression layer skips them. Site assets are still compressed.
+- WebDAV: `Range` is passed on; the reply's `Content-Range` is checked. A server that
+  ignores the range (200) gets the whole file sent.
+- Checked by hand with `curl -r` on both backends (2026-11-12): `0-99`, `1000-`, `-500`,
+  past the end (416 with `bytes */len` and the safety headers), multi-range (200),
+  `If-Range` matching (206) and stale (200), `HEAD`.
+
 
 - Parse `Range` (a single range only; multi-range falls back to `200` with the whole
   file) and `If-Range`.

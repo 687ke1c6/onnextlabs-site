@@ -12,7 +12,7 @@ use axum::{
         multipart::MultipartError, DefaultBodyLimit, FromRequestParts, Multipart, Path as UrlPath,
         Query, Request, State,
     },
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -22,11 +22,11 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use crate::{
-    api::{bad_request, db_error, error, storage_error},
+    api::{bad_request, db_error, error, storage_error, Uncompressed},
     auth::CurrentUser,
     orgs::Org,
     rbac::{self, Permission},
-    storage::{StorageError, StoragePath, UploadError},
+    storage::{ByteRange, StorageError, StoragePath, UploadError},
     AppState,
 };
 
@@ -323,6 +323,7 @@ struct DownloadRow {
     folder: String,
     filename: String,
     content_type: Option<String>,
+    sha256: String,
     public: bool,
 }
 
@@ -334,7 +335,8 @@ async fn download(
 ) -> Result<Response, Response> {
     let not_found = || error(StatusCode::NOT_FOUND, "Document not found.");
     let row: Option<DownloadRow> = sqlx::query_as(
-        "SELECT o.id AS org_id, o.slug, o.name, d.folder, d.filename, d.content_type, d.public
+        "SELECT o.id AS org_id, o.slug, o.name, d.folder, d.filename, d.content_type, d.sha256,
+                d.public
              FROM documents d JOIN organisations o ON o.id = d.org_id WHERE d.id = ?",
     )
     .bind(id)
@@ -348,8 +350,13 @@ async fn download(
         folder,
         filename,
         content_type,
+        sha256,
         public,
     } = row.ok_or_else(not_found)?;
+    // Stored files never change (nothing is overwritten), so the content hash is a strong
+    // validator for `If-Range`.
+    let etag = format!("\"{sha256}\"");
+    let range = requested_range(req.headers(), &etag);
     let org = Org {
         id: org_id,
         slug,
@@ -376,15 +383,27 @@ async fn download(
     let path = folder_path(&org, &folder)?
         .join(&filename)
         .map_err(|_| not_found())?;
-    let blob = match state.storage.get(&path).await {
+    let blob = match state.storage.get(&path, range).await {
         Ok(b) => b,
         Err(StorageError::NotFound) => {
             tracing::warn!(id, %path, "document row has no file in storage");
             return Err(not_found());
         }
+        Err(StorageError::RangeNotSatisfiable { total }) => {
+            let mut res = error(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "That range is outside the file.",
+            );
+            download_headers(res.headers_mut(), &filename, &etag);
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes */{total}")) {
+                res.headers_mut().insert(header::CONTENT_RANGE, v);
+            }
+            return Err(res);
+        }
         Err(e) => return Err(storage_error(e)),
     };
-    let len = blob.len;
+    let len = blob.len();
+    let (total, part) = (blob.total, blob.range);
 
     let mut res = blob.body.into_response();
     let headers = res.headers_mut();
@@ -393,7 +412,32 @@ async fn download(
         .unwrap_or(HeaderValue::from_static("application/octet-stream"));
     headers.insert(header::CONTENT_TYPE, ctype);
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-    if let Ok(v) = HeaderValue::from_str(&content_disposition(&filename)) {
+    download_headers(headers, &filename, &etag);
+    if let Some((first, last)) = part {
+        *res.status_mut() = StatusCode::PARTIAL_CONTENT;
+        if let Ok(v) = HeaderValue::from_str(&format!("bytes {first}-{last}/{total}")) {
+            res.headers_mut().insert(header::CONTENT_RANGE, v);
+        }
+    }
+    // Byte ranges count the stored bytes, so never gzip these on the way out.
+    res.extensions_mut().insert(Uncompressed);
+    Ok(res)
+}
+
+/// The `Range` to honour, if any: a single byte range, and only if `If-Range` (when sent)
+/// names this exact file. Otherwise the whole file is sent.
+fn requested_range(headers: &HeaderMap, etag: &str) -> Option<ByteRange> {
+    let range = ByteRange::parse(headers.get(header::RANGE)?.to_str().ok()?)?;
+    match headers.get(header::IF_RANGE) {
+        None => Some(range),
+        // Strong comparison. A date never matches: no Last-Modified is sent.
+        Some(v) => (v.as_bytes() == etag.as_bytes()).then_some(range),
+    }
+}
+
+/// Headers for every download response, including errors about the range.
+fn download_headers(headers: &mut HeaderMap, filename: &str, etag: &str) {
+    if let Ok(v) = HeaderValue::from_str(&content_disposition(filename)) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     // Uploaded content is untrusted: never sniff it or let it run as a page on this origin.
@@ -406,7 +450,10 @@ async fn download(
         HeaderValue::from_static("sandbox"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    Ok(res)
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(v) = HeaderValue::from_str(etag) {
+        headers.insert(header::ETAG, v);
+    }
 }
 
 // ---- names and paths ----
@@ -530,6 +577,34 @@ mod tests {
             assert!(parse_folder(bad).is_err(), "{bad:?} should be rejected");
         }
         assert!(parse_folder(&["x"; MAX_FOLDER_DEPTH + 1].join("/")).is_err());
+    }
+
+    #[test]
+    fn ranges_need_a_matching_if_range() {
+        let etag = "\"abc\"";
+        let with = |pairs: &[(header::HeaderName, &str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(k, HeaderValue::from_str(v).unwrap());
+            }
+            requested_range(&h, etag)
+        };
+        assert_eq!(with(&[]), None);
+        assert_eq!(
+            with(&[(header::RANGE, "bytes=5-")]),
+            Some(ByteRange::From(5))
+        );
+        assert_eq!(
+            with(&[(header::RANGE, "bytes=5-"), (header::IF_RANGE, "\"abc\"")]),
+            Some(ByteRange::From(5))
+        );
+        for stale in ["\"other\"", "W/\"abc\"", "Thu, 12 Nov 2026 14:49:41 GMT"] {
+            assert_eq!(
+                with(&[(header::RANGE, "bytes=5-"), (header::IF_RANGE, stale)]),
+                None
+            );
+        }
+        assert_eq!(with(&[(header::RANGE, "bytes=0-1,4-5")]), None);
     }
 
     #[test]

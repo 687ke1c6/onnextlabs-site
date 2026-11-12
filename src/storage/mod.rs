@@ -28,10 +28,79 @@ pub enum Storage {
     WebDav(WebDav),
 }
 
-/// A file's bytes, ready to send.
+/// A file's bytes (or one range of them), ready to send.
 pub struct Blob {
-    pub len: u64,
+    /// The whole file's length.
+    pub total: u64,
+    /// First and last byte (inclusive) when only a range was read; `None` = all of it.
+    pub range: Option<(u64, u64)>,
     pub body: Body,
+}
+
+impl Blob {
+    /// How many bytes `body` holds.
+    pub fn len(&self) -> u64 {
+        match self.range {
+            Some((first, last)) => last - first + 1,
+            None => self.total,
+        }
+    }
+}
+
+/// One byte range from a `Range` header, before the file's length is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteRange {
+    /// `bytes=a-b`, inclusive.
+    FromTo(u64, u64),
+    /// `bytes=a-`
+    From(u64),
+    /// `bytes=-n`: the last `n` bytes.
+    Last(u64),
+}
+
+impl ByteRange {
+    /// Parses a `Range` header. `None` for anything but a single, well-formed byte range:
+    /// callers then send the whole file, which is always allowed (RFC 9110 §14.2).
+    pub fn parse(header: &str) -> Option<Self> {
+        let (unit, spec) = header.trim().split_once('=')?;
+        if !unit.trim().eq_ignore_ascii_case("bytes") || spec.contains(',') {
+            return None;
+        }
+        let (first, last) = spec.trim().split_once('-')?;
+        let num = |s: &str| -> Option<u64> {
+            (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| s.parse().ok())
+                .flatten()
+        };
+        match (first.trim(), last.trim()) {
+            ("", n) => Some(ByteRange::Last(num(n)?)),
+            (a, "") => Some(ByteRange::From(num(a)?)),
+            (a, b) => {
+                let (a, b) = (num(a)?, num(b)?);
+                (a <= b).then_some(ByteRange::FromTo(a, b))
+            }
+        }
+    }
+
+    /// First and last byte (inclusive) within a file of `len` bytes, or `None` if the
+    /// range is unsatisfiable (starts past the end, or asks for the last 0 bytes).
+    pub fn resolve(self, len: u64) -> Option<(u64, u64)> {
+        let end = len.checked_sub(1)?;
+        match self {
+            ByteRange::FromTo(a, b) => (a <= end).then(|| (a, b.min(end))),
+            ByteRange::From(a) => (a <= end).then_some((a, end)),
+            ByteRange::Last(n) => (n > 0).then(|| (len - n.min(len), end)),
+        }
+    }
+
+    /// As a `Range` header value, to pass on.
+    fn to_header(self) -> String {
+        match self {
+            ByteRange::FromTo(a, b) => format!("bytes={a}-{b}"),
+            ByteRange::From(a) => format!("bytes={a}-"),
+            ByteRange::Last(n) => format!("bytes=-{n}"),
+        }
+    }
 }
 
 /// A finished upload, still under its temporary name.
@@ -46,6 +115,10 @@ pub enum StorageError {
     NotFound,
     /// `commit` target, or a folder in the way, already exists.
     AlreadyExists,
+    /// The requested range starts past the end of the file (`total` bytes long).
+    RangeNotSatisfiable {
+        total: u64,
+    },
     /// The storage host can't be reached or isn't answering properly.
     Unavailable(String),
     Io(io::Error),
@@ -56,6 +129,9 @@ impl fmt::Display for StorageError {
         match self {
             StorageError::NotFound => f.write_str("not found"),
             StorageError::AlreadyExists => f.write_str("already exists"),
+            StorageError::RangeNotSatisfiable { total } => {
+                write!(f, "range not satisfiable ({total} bytes)")
+            }
             StorageError::Unavailable(why) => write!(f, "storage unavailable: {why}"),
             StorageError::Io(e) => write!(f, "{e}"),
         }
@@ -140,10 +216,15 @@ impl Storage {
         }
     }
 
-    pub async fn get(&self, path: &StoragePath) -> Result<Blob, StorageError> {
+    /// The file, or just `range` of it when given.
+    pub async fn get(
+        &self,
+        path: &StoragePath,
+        range: Option<ByteRange>,
+    ) -> Result<Blob, StorageError> {
         match self {
-            Storage::Local(s) => s.get(path).await,
-            Storage::WebDav(s) => s.get(path).await,
+            Storage::Local(s) => s.get(path, range).await,
+            Storage::WebDav(s) => s.get(path, range).await,
         }
     }
 
@@ -297,6 +378,43 @@ mod tests {
         // Dot-files are a caller policy, not a storage one (temporary uploads use them).
         assert!(root.join(".partial").is_ok());
         assert_eq!(root.join_all("a/b c").unwrap().to_string(), "/a/b c");
+    }
+
+    #[test]
+    fn ranges_parse_like_rfc_9110() {
+        use ByteRange::*;
+        assert_eq!(ByteRange::parse("bytes=0-499"), Some(FromTo(0, 499)));
+        assert_eq!(ByteRange::parse(" Bytes = 500- "), Some(From(500)));
+        assert_eq!(ByteRange::parse("bytes=-500"), Some(Last(500)));
+        // Ignored, so the whole file is sent: multiple ranges, other units, nonsense.
+        for ignored in [
+            "bytes=0-1,5-6",
+            "items=0-1",
+            "bytes=5-1",
+            "bytes=-",
+            "bytes=a-b",
+            "bytes=+1-2",
+            "bytes 0-1",
+            "bytes=99999999999999999999-",
+        ] {
+            assert_eq!(ByteRange::parse(ignored), None, "{ignored:?}");
+        }
+    }
+
+    #[test]
+    fn ranges_resolve_against_the_length() {
+        use ByteRange::*;
+        assert_eq!(FromTo(0, 499).resolve(1000), Some((0, 499)));
+        assert_eq!(FromTo(900, 5000).resolve(1000), Some((900, 999)));
+        assert_eq!(From(999).resolve(1000), Some((999, 999)));
+        assert_eq!(Last(10).resolve(1000), Some((990, 999)));
+        assert_eq!(Last(5000).resolve(1000), Some((0, 999)));
+        // Unsatisfiable.
+        assert_eq!(From(1000).resolve(1000), None);
+        assert_eq!(FromTo(1000, 1001).resolve(1000), None);
+        assert_eq!(Last(0).resolve(1000), None);
+        assert_eq!(From(0).resolve(0), None);
+        assert_eq!(Last(3).to_header(), "bytes=-3");
     }
 
     #[test]

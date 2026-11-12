@@ -7,10 +7,13 @@ use std::{
 
 use axum::body::{Body, Bytes};
 use futures_util::Stream;
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+};
 use tokio_util::io::ReaderStream;
 
-use super::{next_chunk, Blob, Meter, StorageError, StoragePath, UploadError, Uploaded};
+use super::{next_chunk, Blob, ByteRange, Meter, StorageError, StoragePath, UploadError, Uploaded};
 
 pub struct Local {
     root: PathBuf,
@@ -116,15 +119,32 @@ impl Local {
         }
     }
 
-    pub async fn get(&self, path: &StoragePath) -> Result<Blob, StorageError> {
-        let file = fs::File::open(self.path(path)).await?;
+    pub async fn get(
+        &self,
+        path: &StoragePath,
+        range: Option<ByteRange>,
+    ) -> Result<Blob, StorageError> {
+        let mut file = fs::File::open(self.path(path)).await?;
         let meta = file.metadata().await?;
         if !meta.is_file() {
             return Err(StorageError::NotFound);
         }
+        let total = meta.len();
+        let Some(range) = range else {
+            return Ok(Blob {
+                total,
+                range: None,
+                body: Body::from_stream(ReaderStream::new(file)),
+            });
+        };
+        let (first, last) = range
+            .resolve(total)
+            .ok_or(StorageError::RangeNotSatisfiable { total })?;
+        file.seek(io::SeekFrom::Start(first)).await?;
         Ok(Blob {
-            len: meta.len(),
-            body: Body::from_stream(ReaderStream::new(file)),
+            total,
+            range: Some((first, last)),
+            body: Body::from_stream(ReaderStream::new(file.take(last - first + 1))),
         })
     }
 
@@ -179,7 +199,7 @@ mod tests {
         // Hidden until committed.
         let target = dir.join("a.txt").unwrap();
         assert!(matches!(
-            storage.get(&target).await,
+            storage.get(&target, None).await,
             Err(StorageError::NotFound)
         ));
         storage.commit(&up.temp, &target).await.unwrap();
@@ -187,7 +207,18 @@ mod tests {
             std::fs::read_to_string(root.join("orgs/acme/documents/Brand/a.txt")).unwrap(),
             "hello world"
         );
-        assert_eq!(storage.get(&target).await.unwrap().len, 11);
+        assert_eq!(storage.get(&target, None).await.unwrap().len(), 11);
+        let part = storage
+            .get(&target, Some(ByteRange::FromTo(6, 100)))
+            .await
+            .unwrap();
+        assert_eq!((part.total, part.range, part.len()), (11, Some((6, 10)), 5));
+        let bytes = axum::body::to_bytes(part.body, 100).await.unwrap();
+        assert_eq!(&bytes[..], b"world");
+        assert!(matches!(
+            storage.get(&target, Some(ByteRange::From(11))).await,
+            Err(StorageError::RangeNotSatisfiable { total: 11 })
+        ));
 
         // A second upload can't take the same name, and is left for the caller.
         let second = storage

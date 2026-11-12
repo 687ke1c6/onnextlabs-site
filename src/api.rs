@@ -36,6 +36,10 @@ pub fn storage_error(e: crate::storage::StorageError) -> Response {
     match e {
         StorageError::NotFound => not_found("Not found."),
         StorageError::AlreadyExists => error(StatusCode::CONFLICT, "That name is already taken."),
+        StorageError::RangeNotSatisfiable { .. } => error(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "That range is outside the file.",
+        ),
         StorageError::Unavailable(why) => {
             tracing::error!(%why, "storage unavailable");
             error(
@@ -46,3 +50,8 @@ pub fn storage_error(e: crate::storage::StorageError) -> Response {
         StorageError::Io(e) => io_error(e),
     }
 }
+
+/// Put in a response's extensions to keep it from being compressed (see `main`), e.g. a
+/// download that supports byte ranges: compressing would change what the ranges count.
+#[derive(Clone, Copy)]
+pub struct Uncompressed;

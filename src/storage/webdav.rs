@@ -10,7 +10,7 @@ use quick_xml::{events::Event, Reader};
 use reqwest::{header, Client, Method, RequestBuilder, Response, StatusCode, Url};
 use tokio::sync::mpsc;
 
-use super::{next_chunk, Blob, Meter, StorageError, StoragePath, UploadError, Uploaded};
+use super::{next_chunk, Blob, ByteRange, Meter, StorageError, StoragePath, UploadError, Uploaded};
 
 /// Everything but RFC 3986 "unreserved" characters is percent-encoded in a path segment.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -232,27 +232,49 @@ impl WebDav {
         }
     }
 
-    pub async fn get(&self, path: &StoragePath) -> Result<Blob, StorageError> {
+    /// `GET`, passing `range` on. A server that ignores it (200) gets the whole file sent.
+    pub async fn get(
+        &self,
+        path: &StoragePath,
+        range: Option<ByteRange>,
+    ) -> Result<Blob, StorageError> {
         let url = self.url(path, false);
-        let resp = self
-            .request(Method::GET, url.clone())
-            .send()
-            .await
-            .map_err(transport)?;
-        match resp.status() {
-            StatusCode::OK => {}
-            s => return Err(status_error(s, "GET", &url)),
+        let mut req = self.request(Method::GET, url.clone());
+        if let Some(r) = range {
+            req = req.header(header::RANGE, r.to_header());
         }
-        let len = content_length(&resp).ok_or_else(|| {
-            StorageError::Io(std::io::Error::other(format!(
-                "GET {url}: no Content-Length"
-            )))
-        })?;
+        let resp = req.send().await.map_err(transport)?;
+        let bad = |why: &str| StorageError::Io(std::io::Error::other(format!("GET {url}: {why}")));
+        let header = |name| resp.headers().get(name).and_then(|v| v.to_str().ok());
+        let (total, range) = match resp.status() {
+            StatusCode::OK => {
+                let len = content_length(&resp).ok_or_else(|| bad("no Content-Length"))?;
+                (len, None)
+            }
+            StatusCode::PARTIAL_CONTENT => {
+                let (first, last, total) = header(header::CONTENT_RANGE)
+                    .and_then(parse_content_range)
+                    .ok_or_else(|| bad("bad Content-Range"))?;
+                if content_length(&resp).is_some_and(|n| n != last - first + 1) {
+                    return Err(bad("Content-Length doesn't match Content-Range"));
+                }
+                (total, Some((first, last)))
+            }
+            StatusCode::RANGE_NOT_SATISFIABLE => {
+                let total = header(header::CONTENT_RANGE)
+                    .and_then(|v| v.strip_prefix("bytes */"))
+                    .and_then(|n| n.trim().parse().ok())
+                    .ok_or_else(|| bad("416 without the length"))?;
+                return Err(StorageError::RangeNotSatisfiable { total });
+            }
+            s => return Err(status_error(s, "GET", &url)),
+        };
         let body = resp
             .bytes_stream()
             .map(|chunk| chunk.map_err(std::io::Error::other));
         Ok(Blob {
-            len,
+            total,
+            range,
             body: Body::from_stream(body),
         })
     }
@@ -287,6 +309,14 @@ fn content_length(resp: &Response) -> Option<u64> {
         .ok()?
         .parse()
         .ok()
+}
+
+/// `bytes a-b/total` → (a, b, total). An unknown total (`*`) isn't accepted.
+fn parse_content_range(v: &str) -> Option<(u64, u64, u64)> {
+    let (span, total) = v.trim().strip_prefix("bytes ")?.split_once('/')?;
+    let (a, b) = span.split_once('-')?;
+    let (a, b, total) = (a.parse().ok()?, b.parse().ok()?, total.parse().ok()?);
+    (a <= b && b < total).then_some((a, b, total))
 }
 
 fn url_for(base: &Url, path: &StoragePath, dir: bool) -> Url {
@@ -438,6 +468,15 @@ mod tests {
             url_for(&b, &tricky, false).as_str(),
             "http://files.internal:8080/dav/http%3Ax"
         );
+    }
+
+    #[test]
+    fn content_ranges_parse() {
+        assert_eq!(parse_content_range("bytes 0-4/11"), Some((0, 4, 11)));
+        assert_eq!(parse_content_range("bytes 0-4/*"), None);
+        assert_eq!(parse_content_range("bytes 5-4/11"), None);
+        assert_eq!(parse_content_range("bytes 0-11/11"), None);
+        assert_eq!(parse_content_range("bytes */11"), None);
     }
 
     #[test]
