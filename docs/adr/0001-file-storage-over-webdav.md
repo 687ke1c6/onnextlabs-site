@@ -1,6 +1,6 @@
 # ADR 0001: Store organisation files on a WebDAV server
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-12
 
 ## Context

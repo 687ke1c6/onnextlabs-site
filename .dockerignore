@@ -5,3 +5,5 @@ web/dist
 .devcontainer
 documents
 data-dav
+data
+.env
