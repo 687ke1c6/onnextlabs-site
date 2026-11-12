@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "fs", "io-util"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "compression-gzip"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -21,6 +21,7 @@ rand = "0.10.3"
 openidconnect = { version = "4.1.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 time = "0.3.55"
+tokio-util = { version = "0.7.20", features = ["io"] }
 
 [profile.release]
 lto = true

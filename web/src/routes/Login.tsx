@@ -32,7 +32,7 @@ function GoogleIcon() {
 export function LoginPage() {
   const search = loginRoute.useSearch();
   const navigate = useNavigate();
-  const returnTo = () => search().return_to ?? "/admin";
+  const returnTo = () => search().return_to ?? "/portal";
   const [providers] = createResource(fetchProviders);
 
   // Already signed in: skip straight to where they were going.

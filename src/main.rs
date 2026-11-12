@@ -1,8 +1,16 @@
+// Handlers return `Result<_, Response>` so errors are ready-made JSON responses. axum's
+// `Response` is ~128 bytes, which trips this lint; boxing every error isn't worth it here.
+#![allow(clippy::result_large_err)]
+
 mod admin;
 mod altcha;
+mod api;
 mod auth;
 mod db;
+mod documents;
+mod orgs;
 mod rate_limit;
+mod rbac;
 mod subscribe;
 mod users;
 
@@ -36,9 +44,14 @@ struct Args {
     #[arg(long, env = "STATIC_DIR", default_value = "web/dist")]
     static_dir: PathBuf,
 
-    /// Directory holding the SQLite database (created if missing).
-    #[arg(long, env = "DB_DIR", default_value = "data")]
-    db_dir: PathBuf,
+    /// Directory for everything the app stores: the SQLite database and per-organisation
+    /// files under `orgs/<slug>/`. Created if missing. Mount persistent storage here.
+    #[arg(long, env = "DATA_DIR", default_value = "data")]
+    data_dir: PathBuf,
+
+    /// Largest document upload allowed, in megabytes.
+    #[arg(long, env = "MAX_UPLOAD_MB", default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=10_240))]
+    max_upload_mb: u64,
 
     /// Header carrying the real client IP when behind a trusted reverse proxy
     /// (e.g. x-forwarded-for, x-real-ip). Unset = use the TCP peer address.
@@ -64,7 +77,7 @@ struct Args {
     google_client_secret: Option<String>,
 
     /// Comma-separated emails that get admin access on sign-in (provider-verified emails only).
-    /// Stopgap until real RBAC; roles granted via `grant-role` also work.
+    /// Always admins while listed; other admins are set in the portal or with `grant-admin`.
     #[arg(long, env = "ADMIN_EMAILS", value_delimiter = ',')]
     admin_emails: Vec<String>,
 
@@ -75,18 +88,40 @@ struct Args {
 /// Admin tasks run against the database instead of starting the server.
 #[derive(Subcommand)]
 enum Command {
-    /// Grant a role (e.g. admin) to a user by email. They must have signed in once.
-    GrantRole { email: String, role: String },
-    /// Remove a role from a user by email.
-    RevokeRole { email: String, role: String },
-    /// List users and their roles.
+    /// Make a user an admin, by email. They must have signed in once.
+    GrantAdmin { email: String },
+    /// Clear a user's admin flag, by email. (ADMIN_EMAILS addresses stay admins.)
+    RevokeAdmin { email: String },
+    /// List users (and which are admins).
     ListUsers,
+    /// Create an organisation. The slug (URL/folder name) is derived from the name if omitted.
+    CreateOrg {
+        name: String,
+        #[arg(long)]
+        slug: Option<String>,
+    },
+    /// Add a user (by email) to an organisation, or change their role there. They must have
+    /// signed in once.
+    AddMember {
+        org: String,
+        email: String,
+        /// Role name, e.g. Admin or Member.
+        #[arg(long, default_value = "Member")]
+        role: String,
+    },
+    /// Remove a user (by email) from an organisation.
+    RemoveMember { org: String, email: String },
+    /// List organisations and their members.
+    ListOrgs,
 }
 
 pub struct AppState {
     db: SqlitePool,
     auth: auth::Auth,
     altcha: altcha::Altcha,
+    /// Root of all stored files (see `Args::data_dir`).
+    data_dir: PathBuf,
+    max_upload_bytes: u64,
     limiter: RateLimiter,
     client_ip_header: Option<HeaderName>,
 }
@@ -103,16 +138,24 @@ async fn main() {
     let args = Args::parse();
     let static_dir = args.static_dir;
 
-    let db = db::open(&args.db_dir).await.unwrap_or_else(|e| {
+    let db = db::open(&args.data_dir).await.unwrap_or_else(|e| {
         tracing::error!("database: {e}");
         std::process::exit(1);
     });
 
     if let Some(cmd) = args.command {
         let result = match cmd {
-            Command::GrantRole { email, role } => users::grant_role(&db, &email, &role).await,
-            Command::RevokeRole { email, role } => users::revoke_role(&db, &email, &role).await,
+            Command::GrantAdmin { email } => users::set_admin(&db, &email, true).await,
+            Command::RevokeAdmin { email } => users::set_admin(&db, &email, false).await,
             Command::ListUsers => users::list_users(&db).await,
+            Command::CreateOrg { name, slug } => {
+                users::create_org(&db, &name, slug.as_deref()).await
+            }
+            Command::AddMember { org, email, role } => {
+                users::add_member(&db, &org, &email, &role).await
+            }
+            Command::RemoveMember { org, email } => users::remove_member(&db, &org, &email).await,
+            Command::ListOrgs => users::list_orgs(&db).await,
         };
         db.close().await;
         if let Err(e) = result {
@@ -129,7 +172,7 @@ async fn main() {
         .filter(|e| !e.is_empty())
         .collect();
     if admin_emails.is_empty() {
-        tracing::warn!("ADMIN_EMAILS not set; only users granted the admin role can reach /admin");
+        tracing::warn!("ADMIN_EMAILS not set; only accounts flagged as admin have admin access");
     } else {
         tracing::info!("admin emails: {}", admin_emails.join(", "));
     }
@@ -148,11 +191,25 @@ async fn main() {
         }
     };
 
+    let max_upload_bytes = args.max_upload_mb * 1024 * 1024;
+    let data_dir = args.data_dir;
+    if let Err(e) = documents::prepare(&data_dir) {
+        tracing::error!("data dir {}: {e}", data_dir.display());
+        std::process::exit(1);
+    }
+    tracing::info!(
+        "org data stored in {} (max upload {} MB)",
+        data_dir.join("orgs").display(),
+        args.max_upload_mb
+    );
+
     let state = Arc::new(AppState {
         db,
         auth,
         // ~50k SHA-256 hashes worst case: well under a second in a browser.
         altcha: altcha::Altcha::new(altcha_key, 50_000, Duration::from_secs(600)),
+        data_dir,
+        max_upload_bytes,
         // Per IP: 5 signups / 10 min. Globally: 60 / min across everyone.
         limiter: RateLimiter::new(
             Limit {
@@ -186,6 +243,9 @@ async fn main() {
         .route("/api/subscribe", post(subscribe::subscribe))
         .merge(auth::routes())
         .merge(admin::routes())
+        .merge(orgs::routes())
+        .merge(rbac::routes())
+        .merge(documents::routes(max_upload_bytes))
         // Unknown API paths get a JSON 404 rather than the SPA's index.html.
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(spa)

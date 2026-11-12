@@ -18,6 +18,23 @@
   --ring: oklch(0.65 0.2 290);
 }
 
+/* Light tokens, scoped to whatever element carries `.light` (currently the portal shell;
+   the public pages are designed dark-only). */
+.light {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.141 0.005 285.823);
+  --primary: oklch(0.21 0.006 285.885);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.967 0.001 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted-foreground: oklch(0.552 0.016 285.938);
+  --accent: oklch(0.94 0.003 286.35);
+  --accent-foreground: oklch(0.21 0.006 285.885);
+  --border: oklch(0.92 0.004 286.32);
+  --input: oklch(0.87 0.005 286.3);
+  --ring: oklch(0.55 0.2 290);
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

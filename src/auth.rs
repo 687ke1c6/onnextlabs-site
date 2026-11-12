@@ -2,7 +2,8 @@
 //!
 //! Any OIDC provider works: Google is the only one configured today, and Keycloak (or
 //! anything else) would be another `Provider` with a different issuer URL.
-//! Signing in creates a `users` row but grants nothing; access comes from `user_roles`.
+//! Signing in creates a `users` row but grants nothing; access comes from the account's
+//! admin flag (or ADMIN_EMAILS) and org memberships.
 
 use std::{
     collections::HashMap,
@@ -44,7 +45,7 @@ const LOGIN_TTL: Duration = Duration::from_secs(600);
 const MAX_PENDING: usize = 10_000;
 /// Re-fetch provider metadata (incl. signing keys) this often, to pick up key rotation.
 const METADATA_TTL: Duration = Duration::from_secs(3600);
-pub const DEFAULT_RETURN_TO: &str = "/admin";
+pub const DEFAULT_RETURN_TO: &str = "/portal";
 
 type OidcClient = CoreClient<
     EndpointSet,
@@ -152,6 +153,13 @@ impl Auth {
             secure_cookies,
             pending: Mutex::default(),
         }
+    }
+
+    /// Whether ADMIN_EMAILS makes this address an admin. Checked live, so removing an
+    /// address revokes it; only provider-verified emails count, or anyone could claim one.
+    pub fn is_env_admin(&self, email: Option<&str>, verified: bool) -> bool {
+        verified
+            && email.is_some_and(|e| self.admin_emails.iter().any(|a| a.eq_ignore_ascii_case(e)))
     }
 
     fn provider(&self, name: &str) -> Option<&Provider> {
@@ -481,8 +489,18 @@ pub struct CurrentUser {
     pub picture: Option<String>,
     #[serde(skip)]
     pub email_verified: bool,
+    /// Admins can do everything, in every organisation.
+    pub admin: bool,
+    /// Why they're an admin: "flag" (set by an admin or `grant-admin`), "admin-emails".
+    /// Empty if not.
     #[sqlx(skip)]
-    pub roles: Vec<String>,
+    pub admin_via: Vec<&'static str>,
+}
+
+impl CurrentUser {
+    pub fn is_admin(&self) -> bool {
+        self.admin
+    }
 }
 
 impl FromRequestParts<Arc<AppState>> for CurrentUser {
@@ -502,7 +520,7 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         let token = jar.get(SESSION_COOKIE).ok_or_else(unauthorized)?;
 
         let user: Option<CurrentUser> = sqlx::query_as(
-            "SELECT u.id, u.email, u.name, u.picture, u.email_verified
+            "SELECT u.id, u.email, u.name, u.picture, u.email_verified, u.is_admin AS admin
                  FROM sessions s JOIN users u ON u.id = s.user_id
                  WHERE s.token_hash = ? AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
         )
@@ -512,30 +530,23 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         .map_err(internal)?;
         let mut user = user.ok_or_else(unauthorized)?;
 
-        user.roles =
-            sqlx::query_scalar("SELECT role FROM user_roles WHERE user_id = ? ORDER BY role")
-                .bind(user.id)
-                .fetch_all(&state.db)
-                .await
-                .map_err(internal)?;
-
-        // Bootstrap admins from ADMIN_EMAILS (checked live, so removing an address revokes it).
-        // Only provider-verified emails count, or anyone could claim the address.
-        let is_env_admin = user.email_verified
-            && user
-                .email
-                .as_deref()
-                .is_some_and(|e| state.auth.admin_emails.iter().any(|a| a == e));
-        if is_env_admin && !user.roles.iter().any(|r| r == "admin") {
-            user.roles.push("admin".into());
-            user.roles.sort();
+        // Why they're an admin, for "Your access".
+        if user.admin {
+            user.admin_via.push("flag");
+        }
+        if state
+            .auth
+            .is_env_admin(user.email.as_deref(), user.email_verified)
+        {
+            user.admin_via.push("admin-emails");
+            user.admin = true;
         }
 
         Ok(user)
     }
 }
 
-/// A signed-in user holding the `admin` role. Rejects with 401 / 403 otherwise.
+/// A signed-in admin. Rejects with 401 / 403 otherwise.
 pub struct Admin(#[allow(dead_code)] pub CurrentUser);
 
 impl FromRequestParts<Arc<AppState>> for Admin {
@@ -546,7 +557,7 @@ impl FromRequestParts<Arc<AppState>> for Admin {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let user = CurrentUser::from_request_parts(parts, state).await?;
-        if user.roles.iter().any(|r| r == "admin") {
+        if user.is_admin() {
             Ok(Admin(user))
         } else {
             Err(json_error(StatusCode::FORBIDDEN, "Access not granted."))
@@ -560,11 +571,14 @@ mod tests {
 
     #[test]
     fn return_to_is_same_site_only() {
-        assert_eq!(safe_return_to(Some("/admin/users?x=1")), "/admin/users?x=1");
+        assert_eq!(
+            safe_return_to(Some("/portal/documents?x=1")),
+            "/portal/documents?x=1"
+        );
         for bad in [
             None,
             Some(""),
-            Some("admin"),
+            Some("portal"),
             Some("//evil.com"),
             Some("/\\evil.com"),
             Some("https://evil.com"),
