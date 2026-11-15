@@ -2,6 +2,8 @@ set dotenv-load
 
 image := "onnextlabs-site"
 port := env("PORT", "3000")
+files_user := env("FILES_USER", "dev")
+files_password := env("FILES_PASSWORD", "dev")
 
 # list recipes
 default:
@@ -11,18 +13,29 @@ default:
 install:
     bun install --cwd web
 
-# run axum (:3000) and vite (:5173) together; Ctrl-C stops both
+# run WebDAV file storage (:8090), axum (:3000) and vite (:5173) together; Ctrl-C stops all
 dev: install
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'kill 0' EXIT
+    # File storage: reuse one that's already running (e.g. `just files` in another terminal).
+    if curl -s -o /dev/null http://127.0.0.1:8090/; then
+        echo "WebDAV file storage already running on :8090"
+    else
+        just files &
+    fi
     cargo run &
     bun run --cwd web dev &
-    wait -n  # if either server exits (e.g. port in use), stop both
+    wait -n  # if any server exits (e.g. port in use), stop them all
 
 # run only the axum server
 server:
     cargo run
+
+# serve ./data-dav over WebDAV on :8090 (the FILES_URL for dev; `just dev` starts it too)
+files:
+    mkdir -p data-dav
+    RCLONE_USER={{quote(files_user)}} RCLONE_PASS={{quote(files_password)}} rclone serve webdav data-dav --addr 127.0.0.1:8090 --dir-cache-time 5s
 
 # run only the vite dev server
 web:

@@ -28,8 +28,8 @@ RUN adduser -D -u 10001 app
 WORKDIR /app
 COPY --from=builder /app/target/release/onnextlabs-site /usr/local/bin/onnextlabs-site
 COPY --from=web /app/web/dist ./web/dist
-# The database and every organisation's files live here; mount a volume at /app/data
-# to persist them across deploys.
+# The database lives here; mount a volume at /app/data to persist it across deploys.
+# Organisation files are on a WebDAV server (FILES_URL).
 RUN mkdir -p /app/data && chown app:app /app/data
 USER app
 ENV PORT=3000 STATIC_DIR=/app/web/dist DATA_DIR=/app/data

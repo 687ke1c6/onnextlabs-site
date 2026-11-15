@@ -1,10 +1,10 @@
 //! Organisations: the scope every portal feature lives under.
 //!
 //! Admins can see and act on every org ("god mode"); anyone else only on orgs they're a
-//! member of, limited by their role there (see `rbac`). Each org's files live in
-//! `$DATA_DIR/orgs/<slug>/`.
+//! member of, limited by their role there (see `rbac`). Each org's files live in storage
+//! under `orgs/<slug>/` (see `storage`).
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     extract::{Path as UrlPath, State},
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::{
-    api::{bad_request, db_error, error, io_error, not_found},
+    api::{bad_request, db_error, error, not_found, storage_error},
     auth::{Admin, CurrentUser},
     rbac::{self, Permission, Perms},
     AppState,
@@ -48,13 +48,6 @@ pub struct Org {
     pub id: i64,
     pub slug: String,
     pub name: String,
-}
-
-impl Org {
-    /// `$DATA_DIR/orgs/<slug>`: everything stored for this org goes under here.
-    pub fn dir(&self, data_dir: &std::path::Path) -> PathBuf {
-        data_dir.join("orgs").join(&self.slug)
-    }
 }
 
 /// SQL expression: comma-separated permissions of role `r` (null if none).
@@ -247,15 +240,17 @@ async fn create_org(
         Err(e) => return Err(db_error(e)),
     };
 
-    let dir = org
-        .dir(&state.data_dir)
-        .join(crate::documents::DOCUMENTS_FOLDER);
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+    // Its folder in storage (`orgs/<slug>/documents`), so it's browsable straight away.
+    let made = match crate::documents::documents_root(&org) {
+        Ok(dir) => state.storage.make_dirs(&dir).await.map_err(storage_error),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = made {
         let _ = sqlx::query("DELETE FROM organisations WHERE id = ?")
             .bind(org.id)
             .execute(&state.db)
             .await;
-        return Err(io_error(e));
+        return Err(e);
     }
     tracing::info!(org = %org.slug, admin = admin.id, "organisation created");
     Ok((StatusCode::CREATED, Json(org)))

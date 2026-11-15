@@ -11,14 +11,15 @@ mod documents;
 mod orgs;
 mod rate_limit;
 mod rbac;
+mod storage;
 mod subscribe;
 mod users;
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
-    http::HeaderName,
     http::StatusCode,
+    http::{Extensions, HeaderMap, HeaderName, Version},
     routing::{any, get, post},
     Json, Router,
 };
@@ -28,7 +29,7 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::signal;
 use tower_http::{
-    compression::CompressionLayer,
+    compression::{predicate::Predicate, CompressionLayer, DefaultPredicate},
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -44,14 +45,26 @@ struct Args {
     #[arg(long, env = "STATIC_DIR", default_value = "web/dist")]
     static_dir: PathBuf,
 
-    /// Directory for everything the app stores: the SQLite database and per-organisation
-    /// files under `orgs/<slug>/`. Created if missing. Mount persistent storage here.
+    /// Directory for the SQLite database. Created if missing. Mount persistent storage here.
     #[arg(long, env = "DATA_DIR", default_value = "data")]
     data_dir: PathBuf,
 
     /// Largest document upload allowed, in megabytes.
     #[arg(long, env = "MAX_UPLOAD_MB", default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=10_240))]
     max_upload_mb: u64,
+
+    /// WebDAV root for org files, e.g. http://files.railway.internal:8080/. Required to run
+    /// the server (`just files` serves one for local dev); admin commands don't need it.
+    #[arg(long, env = "FILES_URL")]
+    files_url: Option<reqwest::Url>,
+
+    /// Basic auth user for `FILES_URL`.
+    #[arg(long, env = "FILES_USER")]
+    files_user: Option<String>,
+
+    /// Basic auth password for `FILES_URL`.
+    #[arg(long, env = "FILES_PASSWORD", hide_env_values = true)]
+    files_password: Option<String>,
 
     /// Header carrying the real client IP when behind a trusted reverse proxy
     /// (e.g. x-forwarded-for, x-real-ip). Unset = use the TCP peer address.
@@ -119,8 +132,8 @@ pub struct AppState {
     db: SqlitePool,
     auth: auth::Auth,
     altcha: altcha::Altcha,
-    /// Root of all stored files (see `Args::data_dir`).
-    data_dir: PathBuf,
+    /// Where org files live (see `storage`).
+    storage: storage::Storage,
     max_upload_bytes: u64,
     limiter: RateLimiter,
     client_ip_header: Option<HeaderName>,
@@ -192,23 +205,35 @@ async fn main() {
     };
 
     let max_upload_bytes = args.max_upload_mb * 1024 * 1024;
-    let data_dir = args.data_dir;
-    if let Err(e) = documents::prepare(&data_dir) {
-        tracing::error!("data dir {}: {e}", data_dir.display());
+    let Some(files_url) = args.files_url else {
+        tracing::error!(
+            "FILES_URL is not set: org files live on a WebDAV server (`just files` in dev)"
+        );
         std::process::exit(1);
-    }
+    };
+    let storage = match storage::Storage::new(files_url, args.files_user, args.files_password) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("FILES_URL: {e}");
+            std::process::exit(1);
+        }
+    };
     tracing::info!(
-        "org data stored in {} (max upload {} MB)",
-        data_dir.join("orgs").display(),
+        "org files stored in WebDAV at {} (max upload {} MB)",
+        storage.base(),
         args.max_upload_mb
     );
+    // One quick request. Never refuse to start: file requests answer 503 until it is back.
+    if let Err(e) = storage.check().await {
+        tracing::warn!("file storage isn't answering yet: {e}");
+    }
 
     let state = Arc::new(AppState {
         db,
         auth,
         // ~50k SHA-256 hashes worst case: well under a second in a browser.
         altcha: altcha::Altcha::new(altcha_key, 50_000, Duration::from_secs(600)),
-        data_dir,
+        storage,
         max_upload_bytes,
         // Per IP: 5 signups / 10 min. Globally: 60 / min across everyone.
         limiter: RateLimiter::new(
@@ -249,7 +274,13 @@ async fn main() {
         // Unknown API paths get a JSON 404 rather than the SPA's index.html.
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(spa)
-        .layer(CompressionLayer::new())
+        .layer(
+            CompressionLayer::new().compress_when(DefaultPredicate::new().and(
+                |_: StatusCode, _: Version, _: &HeaderMap, ext: &Extensions| {
+                    ext.get::<api::Uncompressed>().is_none()
+                },
+            )),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 

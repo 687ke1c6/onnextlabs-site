@@ -7,6 +7,8 @@ export type DocumentItem = {
   uploaded_at: string;
   uploaded_by: string | null;
   public: boolean;
+  /** Listed in the database, but its file isn't in storage: can't be downloaded. */
+  missing: boolean;
 };
 
 export type FolderListing = {
@@ -67,6 +69,12 @@ export function uploadDocument(
     xhr.onerror = () => reject(new Error("Upload failed: network error."));
     xhr.send(form);
   });
+}
+
+/** Deletes a document whose file is missing from storage (needs `write-docs`). */
+export async function deleteMissingDocument(id: number): Promise<void> {
+  const res = await fetch(`/api/documents/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await errorMessage(res, `Couldn't delete the document (${res.status}).`));
 }
 
 export const downloadUrl = (doc: DocumentItem) => `/api/documents/${doc.id}/download`;
