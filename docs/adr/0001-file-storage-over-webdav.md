@@ -58,6 +58,10 @@ Requirements:
 9. **Local storage remains an option.** With `FILES_URL` unset, the site keeps using
    `$DATA_DIR/orgs` on its own disk, exactly as today. Local dev and tests need no
    WebDAV server. Both modes sit behind one storage interface in the site.
+   *Superseded 2026-11-12:* local storage was removed. WebDAV is the only backend,
+   `FILES_URL` is required, and dev and tests run a local `rclone serve webdav`. One
+   backend means one behaviour to reason about and test, now that storage is the
+   source of truth (see Consequences).
 10. **Failure handling.** If the storage host is unreachable, file requests get
     `503 Storage unavailable` (not a generic 500). Every call has a timeout. The site
     still starts when storage is down, and logs a warning at startup.
@@ -66,7 +70,7 @@ Requirements:
 
 | Variable         | Meaning                                                              |
 | ---------------- | -------------------------------------------------------------------- |
-| `FILES_URL`      | WebDAV root, e.g. `http://files.railway.internal:8080/`. Unset = local disk |
+| `FILES_URL`      | WebDAV root, e.g. `http://files.railway.internal:8080/`. Required (originally: unset = local disk) |
 | `FILES_USER`     | Basic auth user                                                      |
 | `FILES_PASSWORD` | Basic auth password                                                  |
 
@@ -84,6 +88,9 @@ Requirements:
 - **The database and the storage host can disagree** (a file without a row, a row
   without a file). Accepted for now. Downloads of a row whose file is missing already
   return 404.
+  *Update 2026-11-12:* storage is the source of truth, and listing a folder now reconciles
+  it: a file without a row gets one (private), a changed size is taken from storage, and a
+  row without a file is flagged so it can be deleted. See the README, "File storage".
 - **Existing files are not migrated.** They are disposable test data.
 - **rclone caches directory listings** (`--dir-cache-time`). This is harmless while only
   the site writes. If people also edit the store directly, shorten it.

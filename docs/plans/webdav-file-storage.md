@@ -125,9 +125,16 @@ and `--addr [::]:…` answers on IPv4 and IPv6). `just files` checked end to end
   - backing up both volumes.
 - Run `cargo fmt --check`, clippy (`-D warnings`), `cargo test` and the web build.
 
+## After step 4
+
+- Drift: listing a folder reconciles it with storage (README, "File storage").
+- Local storage removed (ADR 0001, decision 9 superseded). `FILES_URL` is required; `just
+  dev` starts rclone; the storage tests run against a real `rclone serve webdav`.
+
 ## Out of scope (later)
 
-- Fixing drift between the database and the files.
+- ~~Fixing drift between the database and the files.~~ Done after step 4: listing a
+  folder reconciles it with storage (README, "File storage").
 - Renaming, moving or deleting documents and folders from the portal.
 - Moving existing files: they're disposable.
 - Signed links.

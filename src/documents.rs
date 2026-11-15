@@ -1,11 +1,19 @@
 //! Per-organisation document store. An org's files live in storage under
 //! `orgs/<slug>/documents/` (folders are real folders there); each file's metadata is a
-//! row in `documents`. Stored files without a row are ignored.
+//! row in `documents`.
 //!
-//! API: list a folder and download private documents (`read-docs`), upload (`write-docs`).
+//! The two can drift apart (files changed on the storage host directly, failures between
+//! the two). Listing a folder reconciles it: a stored file without a row gets one, and a
+//! row whose file is gone is flagged `missing` so someone with `write-docs` can delete it.
+//!
+//! API: list a folder and download private documents (`read-docs`), upload and delete
+//! missing documents (`write-docs`).
 //! Downloads are public unless the document's `public` flag is off.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     extract::{
@@ -14,7 +22,7 @@ use axum::{
     },
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -26,7 +34,7 @@ use crate::{
     auth::CurrentUser,
     orgs::Org,
     rbac::{self, Permission},
-    storage::{ByteRange, StorageError, StoragePath, UploadError},
+    storage::{ByteRange, FileInfo, StorageError, StoragePath, UploadError},
     AppState,
 };
 
@@ -54,20 +62,6 @@ fn folder_path(org: &Org, folder: &str) -> Result<StoragePath, Response> {
         .map_err(|_| bad_request("Invalid folder."))
 }
 
-/// The visible subfolders of `dir`: names that pass `clean_name` (so no dot-folders such
-/// as temporary uploads), sorted case-insensitively.
-async fn subfolders(state: &AppState, dir: &StoragePath) -> Result<Vec<String>, StorageError> {
-    let mut names: Vec<String> = state
-        .storage
-        .list_dirs(dir)
-        .await?
-        .into_iter()
-        .filter(|n| clean_name(n).as_deref() == Ok(n.as_str()))
-        .collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    Ok(names)
-}
-
 pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
     let body_limit = usize::try_from(max_bytes)
         .unwrap_or(usize::MAX)
@@ -81,6 +75,7 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
         )
         .route("/api/orgs/{org}/documents/folders", get(all_folders))
         .route("/api/documents/{id}/download", get(download))
+        .route("/api/documents/{id}", delete(delete_missing))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -94,6 +89,9 @@ struct Document {
     /// Uploader's name (or email), if the account still exists.
     uploaded_by: Option<String>,
     public: bool,
+    /// The row's file isn't in storage (set when listing a folder).
+    #[sqlx(skip)]
+    missing: bool,
 }
 
 /// The `Document` columns plus a static tail (sqlx only takes `&'static str` SQL).
@@ -124,23 +122,17 @@ async fn list(
     let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadDocs).await?;
     let folder = parse_folder(&q.folder).map_err(bad_request)?;
     let dir = folder_path(&org, &folder)?;
-    let folders = match subfolders(&state, &dir).await {
-        Ok(f) => f,
+    let listing = match state.storage.list(&dir).await {
+        Ok(l) => l,
         // The org's root may not exist yet (nothing uploaded); that's just empty.
-        Err(StorageError::NotFound) if folder.is_empty() => Vec::new(),
+        Err(StorageError::NotFound) if folder.is_empty() => Default::default(),
         Err(StorageError::NotFound) => {
             return Err(error(StatusCode::NOT_FOUND, "Folder not found."))
         }
         Err(e) => return Err(storage_error(e)),
     };
-    let documents: Vec<Document> = sqlx::query_as(select_document!(
-        "WHERE d.org_id = ? AND d.folder = ? ORDER BY d.filename COLLATE NOCASE"
-    ))
-    .bind(org.id)
-    .bind(&folder)
-    .fetch_all(&state.db)
-    .await
-    .map_err(db_error)?;
+    let folders = visible_dirs(listing.dirs);
+    let documents = reconcile(&state.db, &org, &folder, &listing.files).await?;
 
     Ok(Json(json!({
         "folder": folder,
@@ -148,6 +140,102 @@ async fn list(
         "documents": documents,
         "max_upload_bytes": state.max_upload_bytes,
     })))
+}
+
+/// The visible subfolders of `dir`: names that pass `clean_name` (so no dot-folders such
+/// as temporary uploads), sorted case-insensitively.
+async fn subfolders(state: &AppState, dir: &StoragePath) -> Result<Vec<String>, StorageError> {
+    Ok(visible_dirs(state.storage.list(dir).await?.dirs))
+}
+
+/// Folders people can see: valid names only (no dot-folders), sorted case-insensitively.
+fn visible_dirs(dirs: Vec<String>) -> Vec<String> {
+    let mut names: Vec<String> = dirs.into_iter().filter(|n| is_clean(n)).collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// A name that's valid as it stands (temporary uploads and other dot-files aren't).
+fn is_clean(name: &str) -> bool {
+    clean_name(name).as_deref() == Ok(name)
+}
+
+/// The folder's documents, after bringing the database in line with `stored`. Storage is
+/// the source of truth; rows only add metadata. So: files without a row get one, rows
+/// whose file changed size take the new size (and lose their now-wrong checksum), and
+/// rows without a file are flagged `missing`.
+async fn reconcile(
+    db: &SqlitePool,
+    org: &Org,
+    folder: &str,
+    stored: &[FileInfo],
+) -> Result<Vec<Document>, Response> {
+    let select = || {
+        sqlx::query_as::<_, Document>(select_document!(
+            "WHERE d.org_id = ? AND d.folder = ? ORDER BY d.filename COLLATE NOCASE"
+        ))
+        .bind(org.id)
+        .bind(folder)
+        .fetch_all(db)
+    };
+    let mut documents = select().await.map_err(db_error)?;
+
+    let found = unrecorded(stored, &documents);
+    let resized = resized(stored, &documents);
+    for (id, size) in &resized {
+        sqlx::query("UPDATE documents SET size = ?, sha256 = NULL WHERE id = ?")
+            .bind(i64::try_from(*size).unwrap_or(i64::MAX))
+            .bind(id)
+            .execute(db)
+            .await
+            .map_err(db_error)?;
+        tracing::info!(id, org = %org.slug, folder, size, "document changed in storage, size updated");
+    }
+    for file in &found {
+        // Private: nobody chose to publish it. Ignored if another listing got there first.
+        sqlx::query(
+            "INSERT OR IGNORE INTO documents (org_id, folder, filename, size, public)
+                 VALUES (?, ?, ?, ?, 0)",
+        )
+        .bind(org.id)
+        .bind(folder)
+        .bind(&file.name)
+        .bind(i64::try_from(file.size).unwrap_or(i64::MAX))
+        .execute(db)
+        .await
+        .map_err(db_error)?;
+        tracing::info!(org = %org.slug, folder, filename = %file.name, size = file.size, "document found in storage, added");
+    }
+    if !found.is_empty() || !resized.is_empty() {
+        documents = select().await.map_err(db_error)?;
+    }
+
+    let names: HashSet<&str> = stored.iter().map(|f| f.name.as_str()).collect();
+    for doc in &mut documents {
+        doc.missing = !names.contains(doc.filename.as_str());
+    }
+    Ok(documents)
+}
+
+/// Rows whose stored file now has a different size: `(id, new size)`.
+fn resized(stored: &[FileInfo], documents: &[Document]) -> Vec<(i64, u64)> {
+    let sizes: HashMap<&str, u64> = stored.iter().map(|f| (f.name.as_str(), f.size)).collect();
+    documents
+        .iter()
+        .filter_map(|d| {
+            let size = *sizes.get(d.filename.as_str())?;
+            (u64::try_from(d.size).ok() != Some(size)).then_some((d.id, size))
+        })
+        .collect()
+}
+
+/// Stored files that should be documents but have no row.
+fn unrecorded<'a>(stored: &'a [FileInfo], documents: &[Document]) -> Vec<&'a FileInfo> {
+    let known: HashSet<&str> = documents.iter().map(|d| d.filename.as_str()).collect();
+    stored
+        .iter()
+        .filter(|f| is_clean(&f.name) && !known.contains(f.name.as_str()))
+        .collect()
 }
 
 /// GET /api/orgs/{org}/documents/folders — every folder path, for the upload destination
@@ -323,7 +411,7 @@ struct DownloadRow {
     folder: String,
     filename: String,
     content_type: Option<String>,
-    sha256: String,
+    sha256: Option<String>,
     public: bool,
 }
 
@@ -354,9 +442,9 @@ async fn download(
         public,
     } = row.ok_or_else(not_found)?;
     // Stored files never change (nothing is overwritten), so the content hash is a strong
-    // validator for `If-Range`.
-    let etag = format!("\"{sha256}\"");
-    let range = requested_range(req.headers(), &etag);
+    // validator for `If-Range`. Files found in storage have no hash, so no validator.
+    let etag = sha256.map(|h| format!("\"{h}\""));
+    let range = requested_range(req.headers(), etag.as_deref());
     let org = Org {
         id: org_id,
         slug,
@@ -394,7 +482,7 @@ async fn download(
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "That range is outside the file.",
             );
-            download_headers(res.headers_mut(), &filename, &etag);
+            download_headers(res.headers_mut(), &filename, etag.as_deref());
             if let Ok(v) = HeaderValue::from_str(&format!("bytes */{total}")) {
                 res.headers_mut().insert(header::CONTENT_RANGE, v);
             }
@@ -412,7 +500,7 @@ async fn download(
         .unwrap_or(HeaderValue::from_static("application/octet-stream"));
     headers.insert(header::CONTENT_TYPE, ctype);
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-    download_headers(headers, &filename, &etag);
+    download_headers(headers, &filename, etag.as_deref());
     if let Some((first, last)) = part {
         *res.status_mut() = StatusCode::PARTIAL_CONTENT;
         if let Ok(v) = HeaderValue::from_str(&format!("bytes {first}-{last}/{total}")) {
@@ -426,17 +514,17 @@ async fn download(
 
 /// The `Range` to honour, if any: a single byte range, and only if `If-Range` (when sent)
 /// names this exact file. Otherwise the whole file is sent.
-fn requested_range(headers: &HeaderMap, etag: &str) -> Option<ByteRange> {
+fn requested_range(headers: &HeaderMap, etag: Option<&str>) -> Option<ByteRange> {
     let range = ByteRange::parse(headers.get(header::RANGE)?.to_str().ok()?)?;
     match headers.get(header::IF_RANGE) {
         None => Some(range),
         // Strong comparison. A date never matches: no Last-Modified is sent.
-        Some(v) => (v.as_bytes() == etag.as_bytes()).then_some(range),
+        Some(v) => (Some(v.as_bytes()) == etag.map(str::as_bytes)).then_some(range),
     }
 }
 
 /// Headers for every download response, including errors about the range.
-fn download_headers(headers: &mut HeaderMap, filename: &str, etag: &str) {
+fn download_headers(headers: &mut HeaderMap, filename: &str, etag: Option<&str>) {
     if let Ok(v) = HeaderValue::from_str(&content_disposition(filename)) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
@@ -451,7 +539,7 @@ fn download_headers(headers: &mut HeaderMap, filename: &str, etag: &str) {
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    if let Ok(v) = HeaderValue::from_str(etag) {
+    if let Some(Ok(v)) = etag.map(HeaderValue::from_str) {
         headers.insert(header::ETAG, v);
     }
 }
@@ -562,6 +650,51 @@ fn multipart_error(e: MultipartError) -> Response {
     error(status, "The upload was malformed or interrupted.")
 }
 
+#[derive(sqlx::FromRow)]
+struct DeleteRow {
+    slug: String,
+    folder: String,
+    filename: String,
+}
+
+/// DELETE /api/documents/{id} — removes a document whose file is missing from storage
+/// (`write-docs`). Documents whose file is still there can't be deleted (yet): 409.
+async fn delete_missing(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath(id): UrlPath<i64>,
+) -> Result<StatusCode, Response> {
+    let not_found = || error(StatusCode::NOT_FOUND, "Document not found.");
+    let row: DeleteRow = sqlx::query_as(
+        "SELECT o.slug, d.folder, d.filename
+             FROM documents d JOIN organisations o ON o.id = d.org_id WHERE d.id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?
+    .ok_or_else(not_found)?;
+    let org = rbac::authorize(&state.db, &user, &row.slug, Permission::WriteDocs).await?;
+
+    // Checked now, not trusted from the listing: the file may have come back since.
+    let path = folder_path(&org, &row.folder)?
+        .join(&row.filename)
+        .map_err(|_| not_found())?;
+    if state.storage.exists(&path).await.map_err(storage_error)? {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "This document's file is in storage, so it isn't missing. Reload the folder.",
+        ));
+    }
+    sqlx::query("DELETE FROM documents WHERE id = ?")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(db_error)?;
+    tracing::info!(id, org = %org.slug, folder = %row.folder, filename = %row.filename, user = user.id, "missing document deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,7 +720,7 @@ mod tests {
             for (k, v) in pairs {
                 h.insert(k, HeaderValue::from_str(v).unwrap());
             }
-            requested_range(&h, etag)
+            requested_range(&h, Some(etag))
         };
         assert_eq!(with(&[]), None);
         assert_eq!(
@@ -605,6 +738,64 @@ mod tests {
             );
         }
         assert_eq!(with(&[(header::RANGE, "bytes=0-1,4-5")]), None);
+        // No checksum, no validator: If-Range never matches.
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, HeaderValue::from_static("bytes=5-"));
+        assert_eq!(requested_range(&h, None), Some(ByteRange::From(5)));
+        h.insert(header::IF_RANGE, HeaderValue::from_static("\"abc\""));
+        assert_eq!(requested_range(&h, None), None);
+    }
+
+    fn doc(filename: &str) -> Document {
+        Document {
+            id: 1,
+            folder: String::new(),
+            filename: filename.into(),
+            size: 1,
+            content_type: None,
+            uploaded_at: String::new(),
+            uploaded_by: None,
+            public: true,
+            missing: false,
+        }
+    }
+
+    #[test]
+    fn only_clean_unknown_files_are_recorded() {
+        let file = |name: &str| FileInfo {
+            name: name.into(),
+            size: 1,
+        };
+        let stored = [
+            file("known.pdf"),
+            file("new.pdf"),
+            file(".new.pdf.partial-0123456789abcdef"),
+            file(".DS_Store"),
+            file(" padded.pdf"),
+        ];
+        let found = unrecorded(&stored, &[doc("known.pdf"), doc("gone.pdf")]);
+        let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["new.pdf"]);
+    }
+
+    #[test]
+    fn storage_sizes_win() {
+        let stored = [
+            FileInfo {
+                name: "same.pdf".into(),
+                size: 1,
+            },
+            FileInfo {
+                name: "edited.pdf".into(),
+                size: 99,
+            },
+        ];
+        let mut edited = doc("edited.pdf");
+        edited.id = 7;
+        assert_eq!(
+            resized(&stored, &[doc("same.pdf"), edited, doc("gone.pdf")]),
+            [(7, 99)]
+        );
     }
 
     #[test]

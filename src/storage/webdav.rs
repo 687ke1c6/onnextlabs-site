@@ -1,5 +1,9 @@
 //! Storage on a WebDAV server (e.g. `rclone serve webdav`). Only a small part of WebDAV is
 //! used: see docs/adr/0001-file-storage-over-webdav.md for the method table.
+//!
+//! Uploads are two steps so a file only appears under its real name once complete:
+//! `upload` writes a hidden temporary file in the target folder, then `commit` moves it
+//! to its name, never overwriting. Callers `delete` the temporary file if they give up.
 
 use std::time::Duration;
 
@@ -10,7 +14,10 @@ use quick_xml::{events::Event, Reader};
 use reqwest::{header, Client, Method, RequestBuilder, Response, StatusCode, Url};
 use tokio::sync::mpsc;
 
-use super::{next_chunk, Blob, ByteRange, Meter, StorageError, StoragePath, UploadError, Uploaded};
+use super::{
+    next_chunk, temp_name, Blob, ByteRange, FileInfo, Listing, Meter, StorageError, StoragePath,
+    UploadError, Uploaded,
+};
 
 /// Everything but RFC 3986 "unreserved" characters is percent-encoded in a path segment.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -24,18 +31,18 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Asks only for what `list_dirs` needs.
+/// Asks only for what `list` needs.
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>"#;
+<propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/></prop></propfind>"#;
 
-pub struct WebDav {
+pub struct Storage {
     client: Client,
     /// Always ends in `/`, so paths can be appended.
     base: Url,
     auth: Option<(String, String)>,
 }
 
-impl WebDav {
+impl Storage {
     pub fn new(
         mut base: Url,
         user: Option<String>,
@@ -65,7 +72,7 @@ impl WebDav {
             (None, Some(_)) => return Err("FILES_PASSWORD is set without FILES_USER".into()),
             (None, None) => None,
         };
-        Ok(WebDav { client, base, auth })
+        Ok(Storage { client, base, auth })
     }
 
     /// The root URL, for logs (credentials are never part of it).
@@ -102,7 +109,7 @@ impl WebDav {
         }
     }
 
-    pub async fn list_dirs(&self, dir: &StoragePath) -> Result<Vec<String>, StorageError> {
+    pub async fn list(&self, dir: &StoragePath) -> Result<Listing, StorageError> {
         let url = self.url(dir, true);
         let resp = self
             .request(propfind(), url.clone())
@@ -120,7 +127,35 @@ impl WebDav {
         let entries = parse_multistatus(&xml).map_err(|e| {
             StorageError::Io(std::io::Error::other(format!("bad PROPFIND reply: {e}")))
         })?;
-        Ok(child_dirs(&url, &entries))
+        Ok(children(&url, entries))
+    }
+
+    /// Is there a file (not a folder) at `path`? A `Depth: 0` `PROPFIND` says which it is;
+    /// servers differ on `HEAD` for folders (rclone answers 405).
+    pub async fn exists(&self, path: &StoragePath) -> Result<bool, StorageError> {
+        let url = self.url(path, false);
+        let resp = self
+            .request(propfind(), url.clone())
+            .header("Depth", "0")
+            .header(header::CONTENT_TYPE, "application/xml")
+            .body(PROPFIND_BODY)
+            .send()
+            .await
+            .map_err(transport)?;
+        match resp.status() {
+            StatusCode::MULTI_STATUS => {}
+            s => {
+                return match status_error(s, "PROPFIND", &url) {
+                    StorageError::NotFound => Ok(false),
+                    e => Err(e),
+                }
+            }
+        }
+        let xml = resp.text().await.map_err(transport)?;
+        let entries = parse_multistatus(&xml).map_err(|e| {
+            StorageError::Io(std::io::Error::other(format!("bad PROPFIND reply: {e}")))
+        })?;
+        Ok(entries.first().is_some_and(|e| !e.collection))
     }
 
     /// `MKCOL` one level at a time, parents first. "Already exists" (405) is fine.
@@ -148,13 +183,17 @@ impl WebDav {
     /// on any failure the temporary file is deleted (an interrupted `PUT` may leave one).
     pub async fn upload<S, E>(
         &self,
-        temp: StoragePath,
+        dir: &StoragePath,
+        name: &str,
         mut source: S,
         max_bytes: u64,
     ) -> Result<Uploaded, UploadError<E>>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin + Send,
     {
+        let temp = dir
+            .join(&temp_name(name))
+            .map_err(|_| StorageError::Io(std::io::Error::other("bad temporary name")))?;
         // The request body must be `'static`, and `source` (a multipart field) isn't:
         // pass chunks through a small channel and drive both sides here.
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
@@ -356,9 +395,12 @@ fn status_error(status: StatusCode, method: &str, url: &Url) -> StorageError {
 struct Entry {
     href: String,
     collection: bool,
+    /// `<getcontentlength>`, for files.
+    size: Option<u64>,
 }
 
-/// Reads `<href>` and whether `<resourcetype>` holds `<collection/>`, per `<response>`.
+/// Reads `<href>`, whether `<resourcetype>` holds `<collection/>`, and
+/// `<getcontentlength>`, per `<response>`.
 /// Namespace prefixes vary between servers, so elements are matched by local name.
 fn parse_multistatus(xml: &str) -> Result<Vec<Entry>, quick_xml::Error> {
     let mut reader = Reader::from_str(xml);
@@ -366,6 +408,7 @@ fn parse_multistatus(xml: &str) -> Result<Vec<Entry>, quick_xml::Error> {
     let mut current: Option<Entry> = None;
     let mut in_href = false;
     let mut in_resourcetype = false;
+    let mut in_length = false;
     loop {
         match reader.read_event()? {
             Event::Start(e) => match e.local_name().as_ref() {
@@ -373,9 +416,11 @@ fn parse_multistatus(xml: &str) -> Result<Vec<Entry>, quick_xml::Error> {
                     current = Some(Entry {
                         href: String::new(),
                         collection: false,
+                        size: None,
                     })
                 }
                 b"href" => in_href = true,
+                b"getcontentlength" => in_length = true,
                 b"resourcetype" => in_resourcetype = true,
                 b"collection" if in_resourcetype => {
                     if let Some(c) = &mut current {
@@ -396,10 +441,16 @@ fn parse_multistatus(xml: &str) -> Result<Vec<Entry>, quick_xml::Error> {
                     c.href.push_str(&t.unescape()?);
                 }
             }
+            Event::Text(t) if in_length => {
+                if let Some(c) = &mut current {
+                    c.size = t.unescape()?.trim().parse().ok();
+                }
+            }
             Event::End(e) => match e.local_name().as_ref() {
                 b"response" => entries.extend(current.take()),
                 b"href" => in_href = false,
                 b"resourcetype" => in_resourcetype = false,
+                b"getcontentlength" => in_length = false,
                 _ => {}
             },
             Event::Eof => break,
@@ -409,22 +460,29 @@ fn parse_multistatus(xml: &str) -> Result<Vec<Entry>, quick_xml::Error> {
     Ok(entries)
 }
 
-/// Names of the folders directly inside `dir_url`. Hrefs can be absolute or relative and
+/// The folders and files directly inside `dir_url`. Hrefs can be absolute or relative and
 /// encoded differently from how we asked, so they're compared as decoded segments.
-fn child_dirs(dir_url: &Url, entries: &[Entry]) -> Vec<String> {
+fn children(dir_url: &Url, entries: Vec<Entry>) -> Listing {
     let parent = decoded_segments(dir_url.path());
-    entries
-        .iter()
-        .filter(|e| e.collection)
-        .filter_map(|e| {
-            let url = dir_url.join(e.href.trim()).ok()?;
-            let mut segments = decoded_segments(url.path());
-            if segments.len() != parent.len() + 1 || !segments.starts_with(&parent) {
-                return None; // the folder itself, or something unexpected
-            }
-            segments.pop()
-        })
-        .collect()
+    let mut listing = Listing::default();
+    for e in entries {
+        let Ok(url) = dir_url.join(e.href.trim()) else {
+            continue;
+        };
+        let mut segments = decoded_segments(url.path());
+        if segments.len() != parent.len() + 1 || !segments.starts_with(&parent) {
+            continue; // the folder itself, or something unexpected
+        }
+        let name = segments.pop().expect("one more than the parent");
+        if e.collection {
+            listing.dirs.push(name);
+        } else {
+            // Every server we know sends the length; 0 is a harmless stand-in.
+            let size = e.size.unwrap_or(0);
+            listing.files.push(FileInfo { name, size });
+        }
+    }
+    listing
 }
 
 fn decoded_segments(path: &str) -> Vec<String> {
@@ -439,7 +497,7 @@ mod tests {
     use super::*;
 
     fn base(s: &str) -> Url {
-        WebDav::new(Url::parse(s).unwrap(), None, None)
+        Storage::new(Url::parse(s).unwrap(), None, None)
             .unwrap()
             .base
             .clone()
@@ -482,13 +540,13 @@ mod tests {
     #[test]
     fn config_is_checked() {
         let url = |s: &str| Url::parse(s).unwrap();
-        assert!(WebDav::new(url("ftp://x/"), None, None).is_err());
-        assert!(WebDav::new(url("http://u:p@x/"), None, None).is_err());
-        assert!(WebDav::new(url("http://x/"), None, Some("p".into())).is_err());
-        assert!(WebDav::new(url("http://x/"), Some("u".into()), Some("p".into())).is_ok());
+        assert!(Storage::new(url("ftp://x/"), None, None).is_err());
+        assert!(Storage::new(url("http://u:p@x/"), None, None).is_err());
+        assert!(Storage::new(url("http://x/"), None, Some("p".into())).is_err());
+        assert!(Storage::new(url("http://x/"), Some("u".into()), Some("p".into())).is_ok());
     }
 
-    /// As `rclone serve webdav` v1.71.2 answered a `Depth: 1` PROPFIND (served from `/`).
+    /// As `rclone serve webdav` v1.71.2 answered `PROPFIND_BODY` with `Depth: 1` (served from `/`).
     const RCLONE: &str = include_str!("testdata/propfind-rclone.xml");
 
     /// Another common shape: `D:` prefix, absolute URLs, `<collection></collection>`,
@@ -512,7 +570,7 @@ mod tests {
   </D:response>
   <D:response>
     <D:href>/dav/orgs/acme/documents/deck.pdf</D:href>
-    <D:propstat><D:prop><D:resourcetype/></D:prop>
+    <D:propstat><D:prop><D:resourcetype/><D:getcontentlength>1234</D:getcontentlength></D:prop>
       <D:status>HTTP/1.1 200 OK</D:status></D:propstat>
   </D:response>
 </D:multistatus>"#;
@@ -524,18 +582,236 @@ mod tests {
         let url = url_for(&b, &dir, true);
         let entries = parse_multistatus(OTHER).unwrap();
         assert_eq!(entries.len(), 4);
-        assert_eq!(child_dirs(&url, &entries), ["R&D", "Tom & Jerry"]);
+        let listing = children(&url, entries);
+        assert_eq!(listing.dirs, ["R&D", "Tom & Jerry"]);
+        assert_eq!(
+            listing.files,
+            [FileInfo {
+                name: "deck.pdf".into(),
+                size: 1234
+            }]
+        );
     }
 
     #[test]
     fn propfind_reads_rclone_replies() {
         let b = base("http://127.0.0.1:8090/");
         let dir = StoragePath::root().join_all("orgs/acme/documents").unwrap();
-        let mut names = child_dirs(
-            &url_for(&b, &dir, true),
-            &parse_multistatus(RCLONE).unwrap(),
+        let mut listing = children(&url_for(&b, &dir, true), parse_multistatus(RCLONE).unwrap());
+        listing.dirs.sort();
+        assert_eq!(
+            listing.dirs,
+            [".hidden", "Brand & Logo", "Q1 #2 100%", "Ünïcode"]
         );
-        names.sort();
-        assert_eq!(names, [".hidden", "Brand & Logo", "Q1 #2 100%", "Ünïcode"]);
+        assert_eq!(
+            listing.files,
+            [FileInfo {
+                name: "deck one.pdf".into(),
+                size: 3
+            }]
+        );
+    }
+
+    /// A real `rclone serve webdav` on a free port, serving a fresh temporary folder.
+    /// Stopped and cleaned up on drop. rclone is the only backend, so these tests fail
+    /// (rather than skip) without it: it's in the devcontainer.
+    struct Rclone {
+        child: std::process::Child,
+        root: std::path::PathBuf,
+        storage: Storage,
+    }
+
+    impl Rclone {
+        async fn start() -> Rclone {
+            let root =
+                std::env::temp_dir().join(format!("onnextlabs-dav-{:016x}", rand::random::<u64>()));
+            std::fs::create_dir_all(&root).unwrap();
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let child = std::process::Command::new("rclone")
+                .args(["serve", "webdav", "--addr", &format!("127.0.0.1:{port}")])
+                .arg(&root)
+                .env("RCLONE_USER", "test")
+                .env("RCLONE_PASS", "test")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("rclone must be installed for these tests (it is in the devcontainer)");
+            let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+            let storage = Storage::new(url, Some("test".into()), Some("test".into())).unwrap();
+            // Built first, so `Drop` stops rclone even if it never answers.
+            let dav = Rclone {
+                child,
+                root,
+                storage,
+            };
+            for _ in 0..100 {
+                if dav.storage.check().await.is_ok() {
+                    return dav;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("rclone didn't start");
+        }
+    }
+
+    impl Drop for Rclone {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn chunks(parts: &[&'static str]) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin {
+        stream::iter(
+            parts
+                .iter()
+                .map(|p| Ok(Bytes::from_static(p.as_bytes())))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[tokio::test]
+    async fn rclone_upload_commit_get_and_no_overwrite() {
+        let dav = Rclone::start().await;
+        let storage = &dav.storage;
+        let dir = StoragePath::root()
+            .join_all("orgs/acme/documents/Q1 #2 100%/Ünï & co")
+            .unwrap();
+        storage.make_dirs(&dir).await.unwrap();
+        storage.make_dirs(&dir).await.unwrap(); // already there: fine
+
+        let up = storage
+            .upload(&dir, "a b.txt", chunks(&["hello ", "world"]), 100)
+            .await
+            .unwrap();
+        assert_eq!(up.size, 11);
+        assert_eq!(
+            up.sha256,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        // Hidden until committed.
+        let target = dir.join("a b.txt").unwrap();
+        assert!(matches!(
+            storage.get(&target, None).await,
+            Err(StorageError::NotFound)
+        ));
+        assert!(!storage.exists(&target).await.unwrap());
+        storage.commit(&up.temp, &target).await.unwrap();
+        let on_disk = dav
+            .root
+            .join("orgs/acme/documents/Q1 #2 100%/Ünï & co/a b.txt");
+        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), "hello world");
+        assert!(storage.exists(&target).await.unwrap());
+        assert!(!storage.exists(&dir).await.unwrap()); // a folder isn't a file
+
+        let whole = storage.get(&target, None).await.unwrap();
+        assert_eq!((whole.total, whole.range, whole.len()), (11, None, 11));
+        let part = storage
+            .get(&target, Some(ByteRange::FromTo(6, 100)))
+            .await
+            .unwrap();
+        assert_eq!((part.total, part.range, part.len()), (11, Some((6, 10)), 5));
+        let bytes = axum::body::to_bytes(part.body, 100).await.unwrap();
+        assert_eq!(&bytes[..], b"world");
+        let last = storage
+            .get(&target, Some(ByteRange::Last(5)))
+            .await
+            .unwrap();
+        assert_eq!(last.range, Some((6, 10)));
+        assert!(matches!(
+            storage.get(&target, Some(ByteRange::From(11))).await,
+            Err(StorageError::RangeNotSatisfiable { total: 11 })
+        ));
+
+        // A second upload can't take the same name, and is left for the caller.
+        let second = storage
+            .upload(&dir, "a b.txt", chunks(&["other"]), 100)
+            .await
+            .unwrap();
+        assert!(matches!(
+            storage.commit(&second.temp, &target).await,
+            Err(StorageError::AlreadyExists)
+        ));
+        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), "hello world");
+        storage.delete(&second.temp).await.unwrap();
+
+        let docs = StoragePath::root().join_all("orgs/acme/documents").unwrap();
+        let listing = storage.list(&docs).await.unwrap();
+        assert_eq!(listing.dirs, ["Q1 #2 100%"]);
+        assert!(listing.files.is_empty());
+        let listing = storage.list(&dir).await.unwrap();
+        assert!(listing.dirs.is_empty());
+        assert_eq!(
+            listing.files,
+            [FileInfo {
+                name: "a b.txt".into(),
+                size: 11
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn rclone_failed_uploads_leave_nothing() {
+        let dav = Rclone::start().await;
+        let storage = &dav.storage;
+        let dir = StoragePath::root().join("docs").unwrap();
+        storage.make_dirs(&dir).await.unwrap();
+
+        let too_big = storage
+            .upload(&dir, "big.bin", chunks(&["12345", "678"]), 6)
+            .await;
+        assert!(matches!(too_big, Err(UploadError::TooLarge)));
+        let empty = storage.upload(&dir, "empty.bin", chunks(&[]), 6).await;
+        assert!(matches!(empty, Err(UploadError::Empty)));
+        let broken = stream::iter(vec![
+            Ok(Bytes::from_static(b"abc")),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let cut_off = storage.upload(&dir, "cut.bin", broken, 100).await;
+        assert!(matches!(cut_off, Err(UploadError::Source(_))));
+
+        assert_eq!(std::fs::read_dir(dav.root.join("docs")).unwrap().count(), 0);
+        assert!(storage.list(&dir).await.unwrap().files.is_empty());
+        let missing = StoragePath::root().join("missing").unwrap();
+        assert!(matches!(
+            storage.list(&missing).await,
+            Err(StorageError::NotFound)
+        ));
+        assert!(matches!(
+            storage.upload(&missing, "x", chunks(&["x"]), 6).await,
+            Err(UploadError::Storage(StorageError::NotFound))
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_down_and_bad_credentials_are_unavailable() {
+        let dav = Rclone::start().await;
+        let wrong = Storage::new(
+            dav.storage.base.clone(),
+            Some("test".into()),
+            Some("nope".into()),
+        )
+        .unwrap();
+        assert!(matches!(
+            wrong.list(&StoragePath::root()).await,
+            Err(StorageError::Unavailable(_))
+        ));
+        let base = dav.storage.base.clone();
+        drop(dav);
+        let down = Storage::new(base, Some("test".into()), Some("test".into())).unwrap();
+        assert!(matches!(
+            down.check().await,
+            Err(StorageError::Unavailable(_))
+        ));
+        assert!(matches!(
+            down.get(&StoragePath::root().join("x").unwrap(), None)
+                .await,
+            Err(StorageError::Unavailable(_))
+        ));
     }
 }

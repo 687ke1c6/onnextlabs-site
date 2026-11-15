@@ -1,8 +1,8 @@
 //! Organisations: the scope every portal feature lives under.
 //!
 //! Admins can see and act on every org ("god mode"); anyone else only on orgs they're a
-//! member of, limited by their role there (see `rbac`). Each org's files live in
-//! `$DATA_DIR/orgs/<slug>/`.
+//! member of, limited by their role there (see `rbac`). Each org's files live in storage
+//! under `orgs/<slug>/` (see `storage`).
 
 use std::sync::Arc;
 

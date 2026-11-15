@@ -1,7 +1,5 @@
-//! Where org files live. One interface over the backends chosen at startup:
-//!
-//! - `Local`: a directory on this machine (`$DATA_DIR`), the default.
-//! - `WebDav`: a WebDAV server, when `FILES_URL` is set (docs/adr/0001-file-storage-over-webdav.md).
+//! Where org files live: a WebDAV server at `FILES_URL` (docs/adr/0001-file-storage-over-webdav.md).
+//! It's the source of truth for which files exist; the database only adds details to them.
 //!
 //! Paths are `StoragePath`s, relative to the storage root and checked segment by segment,
 //! so nothing here can reach outside the root. What names are *allowed* (no dot-files,
@@ -11,22 +9,15 @@
 //! `upload` writes a hidden temporary file in the target folder, then `commit` moves it
 //! to its name, never overwriting. Callers `delete` the temporary file if they give up.
 
-mod local;
 mod webdav;
 
-use std::{fmt, io, path::PathBuf};
+use std::{fmt, io};
 
 use axum::body::{Body, Bytes};
 use futures_util::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
 
-pub use local::Local;
-pub use webdav::WebDav;
-
-pub enum Storage {
-    Local(Local),
-    WebDav(WebDav),
-}
+pub use webdav::Storage;
 
 /// A file's bytes (or one range of them), ready to send.
 pub struct Blob {
@@ -82,17 +73,6 @@ impl ByteRange {
         }
     }
 
-    /// First and last byte (inclusive) within a file of `len` bytes, or `None` if the
-    /// range is unsatisfiable (starts past the end, or asks for the last 0 bytes).
-    pub fn resolve(self, len: u64) -> Option<(u64, u64)> {
-        let end = len.checked_sub(1)?;
-        match self {
-            ByteRange::FromTo(a, b) => (a <= end).then(|| (a, b.min(end))),
-            ByteRange::From(a) => (a <= end).then_some((a, end)),
-            ByteRange::Last(n) => (n > 0).then(|| (len - n.min(len), end)),
-        }
-    }
-
     /// As a `Range` header value, to pass on.
     fn to_header(self) -> String {
         match self {
@@ -101,6 +81,19 @@ impl ByteRange {
             ByteRange::Last(n) => format!("bytes=-{n}"),
         }
     }
+}
+
+/// What's directly inside a folder. Names are as stored, hidden ones included.
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub dirs: Vec<String>,
+    pub files: Vec<FileInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileInfo {
+    pub name: String,
+    pub size: u64,
 }
 
 /// A finished upload, still under its temporary name.
@@ -165,95 +158,8 @@ impl<E> From<StorageError> for UploadError<E> {
     }
 }
 
-impl Storage {
-    /// Names of the folders directly inside `dir` (all of them, including hidden ones).
-    pub async fn list_dirs(&self, dir: &StoragePath) -> Result<Vec<String>, StorageError> {
-        match self {
-            Storage::Local(s) => s.list_dirs(dir).await,
-            Storage::WebDav(s) => s.list_dirs(dir).await,
-        }
-    }
-
-    /// Creates `dir` and any missing parents. Fine if it already exists.
-    pub async fn make_dirs(&self, dir: &StoragePath) -> Result<(), StorageError> {
-        match self {
-            Storage::Local(s) => s.make_dirs(dir).await,
-            Storage::WebDav(s) => s.make_dirs(dir).await,
-        }
-    }
-
-    /// Streams `source` to a hidden temporary file in `dir` (which must exist), enforcing
-    /// `max_bytes` and hashing as it goes. On error nothing is left behind.
-    pub async fn upload<S, E>(
-        &self,
-        dir: &StoragePath,
-        name: &str,
-        source: S,
-        max_bytes: u64,
-    ) -> Result<Uploaded, UploadError<E>>
-    where
-        S: Stream<Item = Result<Bytes, E>> + Unpin + Send,
-    {
-        let temp = dir
-            .join(&temp_name(name))
-            .map_err(|_| StorageError::Io(io::Error::other("bad temporary name")))?;
-        match self {
-            Storage::Local(s) => s.upload(temp, source, max_bytes).await,
-            Storage::WebDav(s) => s.upload(temp, source, max_bytes).await,
-        }
-    }
-
-    /// Moves a finished upload to `target`. `AlreadyExists` if the name is taken: nothing
-    /// is overwritten, and the temporary file is left for the caller to retry or delete.
-    pub async fn commit(
-        &self,
-        temp: &StoragePath,
-        target: &StoragePath,
-    ) -> Result<(), StorageError> {
-        match self {
-            Storage::Local(s) => s.commit(temp, target).await,
-            Storage::WebDav(s) => s.commit(temp, target).await,
-        }
-    }
-
-    /// The file, or just `range` of it when given.
-    pub async fn get(
-        &self,
-        path: &StoragePath,
-        range: Option<ByteRange>,
-    ) -> Result<Blob, StorageError> {
-        match self {
-            Storage::Local(s) => s.get(path, range).await,
-            Storage::WebDav(s) => s.get(path, range).await,
-        }
-    }
-
-    pub async fn delete(&self, path: &StoragePath) -> Result<(), StorageError> {
-        match self {
-            Storage::Local(s) => s.delete(path).await,
-            Storage::WebDav(s) => s.delete(path).await,
-        }
-    }
-
-    /// For the startup log line.
-    pub fn describe(&self) -> String {
-        match self {
-            Storage::Local(s) => format!("local directory {}", s.root().display()),
-            Storage::WebDav(s) => format!("WebDAV at {}", s.base()),
-        }
-    }
-
-    /// Whether storage answers at all, for the startup log. Local disk always does.
-    pub async fn check(&self) -> Result<(), StorageError> {
-        match self {
-            Storage::Local(_) => Ok(()),
-            Storage::WebDav(s) => s.check().await,
-        }
-    }
-}
-
 /// `.<name>.partial-<random>`: hidden (dot-files are never listed as documents) and unique.
-fn temp_name(name: &str) -> String {
+pub(crate) fn temp_name(name: &str) -> String {
     format!(".{name}.partial-{:016x}", rand::random::<u64>())
 }
 
@@ -346,11 +252,6 @@ impl StoragePath {
     pub fn segments(&self) -> &[String] {
         &self.0
     }
-
-    /// On a local filesystem, under `root`.
-    fn to_local(&self, root: &std::path::Path) -> PathBuf {
-        self.0.iter().fold(root.to_path_buf(), |p, s| p.join(s))
-    }
 }
 
 impl fmt::Display for StoragePath {
@@ -402,19 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn ranges_resolve_against_the_length() {
-        use ByteRange::*;
-        assert_eq!(FromTo(0, 499).resolve(1000), Some((0, 499)));
-        assert_eq!(FromTo(900, 5000).resolve(1000), Some((900, 999)));
-        assert_eq!(From(999).resolve(1000), Some((999, 999)));
-        assert_eq!(Last(10).resolve(1000), Some((990, 999)));
-        assert_eq!(Last(5000).resolve(1000), Some((0, 999)));
-        // Unsatisfiable.
-        assert_eq!(From(1000).resolve(1000), None);
-        assert_eq!(FromTo(1000, 1001).resolve(1000), None);
-        assert_eq!(Last(0).resolve(1000), None);
-        assert_eq!(From(0).resolve(0), None);
-        assert_eq!(Last(3).to_header(), "bytes=-3");
+    fn ranges_pass_on_as_headers() {
+        assert_eq!(ByteRange::FromTo(0, 499).to_header(), "bytes=0-499");
+        assert_eq!(ByteRange::From(500).to_header(), "bytes=500-");
+        assert_eq!(ByteRange::Last(3).to_header(), "bytes=-3");
     }
 
     #[test]

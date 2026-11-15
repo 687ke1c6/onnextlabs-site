@@ -25,11 +25,6 @@ pub fn db_error(e: sqlx::Error) -> Response {
     error(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.")
 }
 
-pub fn io_error(e: std::io::Error) -> Response {
-    tracing::error!(error = %e, "filesystem error");
-    error(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.")
-}
-
 /// Storage failures as responses. `Unavailable` is a 503 so it reads as "try again later".
 pub fn storage_error(e: crate::storage::StorageError) -> Response {
     use crate::storage::StorageError;
@@ -47,7 +42,11 @@ pub fn storage_error(e: crate::storage::StorageError) -> Response {
                 "File storage is unavailable. Try again shortly.",
             )
         }
-        StorageError::Io(e) => io_error(e),
+        // An answer we didn't expect from the storage server.
+        StorageError::Io(e) => {
+            tracing::error!(error = %e, "storage error");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.")
+        }
     }
 }
 

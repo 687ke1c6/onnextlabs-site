@@ -5,10 +5,12 @@ import ChevronRight from "lucide-solid/icons/chevron-right";
 import Folder from "lucide-solid/icons/folder";
 import FolderOpen from "lucide-solid/icons/folder-open";
 import Link2 from "lucide-solid/icons/link-2";
+import Trash from "lucide-solid/icons/trash";
+import FileX from "lucide-solid/icons/file-x";
 import Upload from "lucide-solid/icons/upload";
 import { FileTypeIcon } from "~/components/FileTypeIcon";
 import { Button } from "~/components/ui/button";
-import { type DocumentItem, downloadUrl, fetchFolder, formatBytes } from "~/lib/documents";
+import { type DocumentItem, deleteMissingDocument, downloadUrl, fetchFolder, formatBytes } from "~/lib/documents";
 import { settled } from "~/lib/utils";
 import { can } from "~/lib/orgs";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
@@ -88,6 +90,34 @@ function CopyLinkButton(props: { doc: DocumentItem }) {
   );
 }
 
+function DeleteMissingButton(props: { doc: DocumentItem; onDeleted: () => void; onError: (msg: string) => void }) {
+  const [busy, setBusy] = createSignal(false);
+  const remove = async () => {
+    if (!confirm(`Remove ${props.doc.filename} from the list? Its file is already gone from storage.`)) return;
+    setBusy(true);
+    try {
+      await deleteMissingDocument(props.doc.id);
+      props.onDeleted();
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : "Couldn't delete the document.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={remove}
+      disabled={busy()}
+      class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-red-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+      aria-label={`Delete missing document ${props.doc.filename}`}
+      title="Delete from the list"
+    >
+      <Trash size={16} />
+    </button>
+  );
+}
+
 function DocumentsBrowser() {
   const org = useOrg();
   const search = useSearch({ from: "/portal/$org/documents" });
@@ -97,6 +127,11 @@ function DocumentsBrowser() {
   // Object source: an empty-string folder (top level) would otherwise count as "don't fetch".
   const [listing, { refetch }] = createResource(() => ({ folder: folder() }), (s) => fetchFolder(org.slug, s.folder));
   const [uploadOpen, setUploadOpen] = createSignal(false);
+  const [actionError, setActionError] = createSignal<string | null>(null);
+  createEffect(() => {
+    folder();
+    setActionError(null);
+  });
   const [maxBytes, setMaxBytes] = createSignal(DEFAULT_MAX_BYTES);
   createEffect(() => {
     if (listing.state === "ready") setMaxBytes(settled(listing)!.max_upload_bytes);
@@ -128,6 +163,10 @@ function DocumentsBrowser() {
       <div class="mt-6">
         <Breadcrumbs folder={folder()} />
       </div>
+
+      <Show when={actionError()}>
+        <p role="alert" class="mt-4 text-sm text-red-500">{actionError()}</p>
+      </Show>
 
       <Show when={listing.error}>
         <div class="mt-4 rounded-xl border border-border p-6 text-sm">
@@ -195,22 +234,48 @@ function DocumentsBrowser() {
                 </For>
                 <For each={settled(listing)?.documents}>
                   {(doc) => (
-                    <tr class="border-b border-border last:border-0 hover:bg-accent/40">
+                    <tr class={doc.missing ? "border-b border-border bg-red-500/5 last:border-0" : "border-b border-border last:border-0 hover:bg-accent/40"}>
                       <td class="px-4 py-0">
-                        <a
-                          href={downloadUrl(doc)}
-                          download={doc.filename}
-                          class="flex min-w-0 items-center gap-3 py-3 focus-visible:outline-none focus-visible:underline"
-                          title={`Download ${doc.filename}`}
+                        <Show
+                          when={!doc.missing}
+                          fallback={
+                            <div class="flex min-w-0 items-center gap-3 py-3" title="This file is missing from storage, so it can't be downloaded.">
+                              <FileX size={18} class="shrink-0 text-red-500" aria-hidden="true" />
+                              <span class="truncate text-muted-foreground line-through">{doc.filename}</span>
+                              <span class="shrink-0 rounded-full border border-red-500/40 px-2 py-0.5 text-xs font-medium text-red-500">
+                                File missing
+                              </span>
+                            </div>
+                          }
                         >
-                          <FileTypeIcon filename={doc.filename} contentType={doc.content_type} />
-                          <span class="truncate">{doc.filename}</span>
-                        </a>
+                          <a
+                            href={downloadUrl(doc)}
+                            download={doc.filename}
+                            class="flex min-w-0 items-center gap-3 py-3 focus-visible:outline-none focus-visible:underline"
+                            title={`Download ${doc.filename}`}
+                          >
+                            <FileTypeIcon filename={doc.filename} contentType={doc.content_type} />
+                            <span class="truncate">{doc.filename}</span>
+                          </a>
+                        </Show>
                       </td>
                       <td class="hidden px-4 py-3 tabular-nums text-muted-foreground sm:table-cell">{formatBytes(doc.size)}</td>
                       <td class="hidden truncate px-4 py-3 text-muted-foreground md:table-cell">{doc.uploaded_by ?? "—"}</td>
                       <td class="hidden px-4 py-3 text-muted-foreground sm:table-cell">{formatDate(doc.uploaded_at)}</td>
-                      <td class="px-2 py-1.5"><CopyLinkButton doc={doc} /></td>
+                      <td class="px-2 py-1.5">
+                        <Show when={doc.missing} fallback={<CopyLinkButton doc={doc} />}>
+                          <Show when={canUpload()}>
+                            <DeleteMissingButton
+                              doc={doc}
+                              onDeleted={() => {
+                                setActionError(null);
+                                void refetch();
+                              }}
+                              onError={setActionError}
+                            />
+                          </Show>
+                        </Show>
+                      </td>
                     </tr>
                   )}
                 </For>

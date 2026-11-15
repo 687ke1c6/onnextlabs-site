@@ -4,9 +4,12 @@ Solid + TypeScript + Tailwind v4 + shadcn-style components (`web/`), served by a
 
 ## Develop (devcontainer)
 ```sh
+just dev                  # all of the below, together
+just files                # WebDAV file storage on :8090 (./data-dav), see File storage
 cargo run                 # axum on :3000 (serves web/dist, /api/health)
 bun run --cwd web dev     # vite on :5173, proxies /api to :3000
 ```
+Copy `.env.example` to `.env` first: the server needs `FILES_URL` and won't start without it.
 
 ## Configuration
 All settings are env vars (or matching `--flags`; see `cargo run -- --help`). See
@@ -44,8 +47,8 @@ Signing in alone grants nothing. Access comes from:
   permissions they hold themselves in that org. Everyone can see their own roles at
   `/portal/access` (account menu → Your access).
 
-Each organisation's files are stored under `orgs/<slug>/` (documents in `documents/`), on
-local disk or a WebDAV server: see [File storage](#file-storage).
+Each organisation's files are stored under `orgs/<slug>/` (documents in `documents/`) on
+the WebDAV file server: see [File storage](#file-storage).
 
 The same can be done on the command line (people must have signed in once to be added):
 ```sh
@@ -59,28 +62,39 @@ onnextlabs-site list-users
 ```
 
 ### File storage
-Organisation files are kept in one of two places, chosen at startup (the log says which):
+Organisation files live on a WebDAV server: a stock [`rclone serve webdav`], with its own
+volume in production. The site still decides who may do what; uploads and downloads stream
+through it. Only the database lives in `DATA_DIR`.
 
-- **Local disk** (the default, `FILES_URL` unset): under `$DATA_DIR/orgs/`.
-- **A WebDAV server** (`FILES_URL` set): a stock [`rclone serve webdav`] on its own volume.
-  The site still decides who may do what; uploads and downloads stream through it.
-
-Either way the layout is the folder tree people see in the portal, so the store can be
-browsed directly: `orgs/<slug>/documents/<folder>/<file>`. Uploads appear under their name
+The layout is the folder tree people see in the portal, so the store can be browsed
+directly: `orgs/<slug>/documents/<folder>/<file>`. Uploads appear under their name
 only once complete (they're written to a hidden `.<name>.partial-…` file first, then
-renamed), and a file is never overwritten. The database keeps each document's details
-(uploader, size, checksum, public flag); folders aren't tracked in it. The design is in
+renamed), and a file is never overwritten. The design is in
 [ADR 0001](docs/adr/0001-file-storage-over-webdav.md).
+
+**The files in storage are the source of truth.** The database only adds details to them
+(uploader, upload date, checksum, public flag); folders aren't tracked in it at all. Files
+can be added, replaced or removed on the storage host directly, and each folder is brought
+back in line when someone opens it in the portal:
+
+- A file without a database entry gets one: **private**, no uploader, dated when it was found.
+- A file whose size changed takes the new size (and loses its checksum).
+- An entry whose file is gone is shown as **File missing** and can't be downloaded. Anyone
+  with `write-docs` can delete it from the list. Entries whose file exists can't be deleted
+  from the portal.
+
+Hidden files (names starting with `.`) are never listed.
 
 | Variable         | Meaning                                                            |
 | ---------------- | ------------------------------------------------------------------ |
-| `FILES_URL`      | WebDAV root, e.g. `http://127.0.0.1:8090/`. Unset = local disk     |
+| `FILES_URL`      | WebDAV root, e.g. `http://127.0.0.1:8090/`. Required               |
 | `FILES_USER`     | Basic auth user                                                    |
 | `FILES_PASSWORD` | Basic auth password                                                |
 
-To try WebDAV locally, run `just files` (it serves `./data-dav` on `127.0.0.1:8090` as user
-`dev`, password `dev`, or your `FILES_USER`/`FILES_PASSWORD`), then uncomment the `FILES_*`
-lines in `.env` and restart the server. Files already on local disk aren't moved over.
+In dev, `just files` (also started by `just dev`) serves `./data-dav` on `127.0.0.1:8090`
+as user `dev`, password `dev` (or your `FILES_USER`/`FILES_PASSWORD`), which is what
+`.env.example` points at. The storage tests (`cargo test`) start their own rclone, so it
+must be installed; it is in the devcontainer.
 
 If the WebDAV server is down or rejects the credentials, the site still starts (with a
 warning in the log) and file requests answer `503` until it's back.
@@ -99,18 +113,24 @@ warning in the log) and file requests answer `503` until it's back.
 3. Back up **both** volumes: the site's (database) and the files service's (files). A
    restore should use copies taken at about the same time, as the database refers to files.
 
-rclone caches directory listings for 5 minutes (`--dir-cache-time`). That's harmless while
-only the site writes. If people also change files on the volume directly, add
-`--dir-cache-time 10s` (or similar) to the start command.
+rclone caches directory listings for 5 minutes (`--dir-cache-time`). Changes made through
+rclone (by the site, or by someone using the WebDAV share) show up at once. Changes made on
+the volume underneath it show up only when the cache expires, so if people do that, add
+`--dir-cache-time 10s` (or similar) to the start command. `just files` uses 5 seconds, so
+files you add to `data-dav/` by hand show up quickly.
 
 [`rclone serve webdav`]: https://rclone.org/commands/rclone_serve_webdav/
 
 ## Build & run with Docker
 ```sh
 docker build -t onnextlabs-site .
-docker run --rm -p 3000:3000 -v onnextlabs-data:/app/data --env-file .env onnextlabs-site
+docker run --rm -p 3000:3000 -v onnextlabs-data:/app/data --env-file .env \
+  -e FILES_URL=http://<webdav-host>:8080/ onnextlabs-site
 ```
-Mount a volume at `/app/data` (`DATA_DIR`) so the database and organisation files survive redeploys.
+Mount a volume at `/app/data` (`DATA_DIR`) so the database survives redeploys. Files are on
+the WebDAV server (`FILES_URL`), which must be reachable from the container: `127.0.0.1` in
+`.env` means the container itself. See [On Railway](#on-railway) for running rclone
+alongside.
 
 UI primitives in `web/src/components/ui` follow the shadcn conventions (cva + tailwind-merge);
 `web/components.json` is set up for the shadcn-solid CLI to add more.

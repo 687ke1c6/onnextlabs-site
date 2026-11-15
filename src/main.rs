@@ -45,8 +45,7 @@ struct Args {
     #[arg(long, env = "STATIC_DIR", default_value = "web/dist")]
     static_dir: PathBuf,
 
-    /// Directory for everything the app stores: the SQLite database and per-organisation
-    /// files under `orgs/<slug>/`. Created if missing. Mount persistent storage here.
+    /// Directory for the SQLite database. Created if missing. Mount persistent storage here.
     #[arg(long, env = "DATA_DIR", default_value = "data")]
     data_dir: PathBuf,
 
@@ -54,8 +53,8 @@ struct Args {
     #[arg(long, env = "MAX_UPLOAD_MB", default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=10_240))]
     max_upload_mb: u64,
 
-    /// WebDAV root for org files (e.g. http://files.railway.internal:8080/). Unset = keep
-    /// them on local disk under `DATA_DIR`.
+    /// WebDAV root for org files, e.g. http://files.railway.internal:8080/. Required to run
+    /// the server (`just files` serves one for local dev); admin commands don't need it.
     #[arg(long, env = "FILES_URL")]
     files_url: Option<reqwest::Url>,
 
@@ -206,25 +205,22 @@ async fn main() {
     };
 
     let max_upload_bytes = args.max_upload_mb * 1024 * 1024;
-    let storage = match args.files_url {
-        Some(url) => match storage::WebDav::new(url, args.files_user, args.files_password) {
-            Ok(dav) => storage::Storage::WebDav(dav),
-            Err(e) => {
-                tracing::error!("FILES_URL: {e}");
-                std::process::exit(1);
-            }
-        },
-        None => match storage::Local::new(args.data_dir.clone()) {
-            Ok(local) => storage::Storage::Local(local),
-            Err(e) => {
-                tracing::error!("data dir {}: {e}", args.data_dir.display());
-                std::process::exit(1);
-            }
-        },
+    let Some(files_url) = args.files_url else {
+        tracing::error!(
+            "FILES_URL is not set: org files live on a WebDAV server (`just files` in dev)"
+        );
+        std::process::exit(1);
+    };
+    let storage = match storage::Storage::new(files_url, args.files_user, args.files_password) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("FILES_URL: {e}");
+            std::process::exit(1);
+        }
     };
     tracing::info!(
-        "org files stored in {} (max upload {} MB)",
-        storage.describe(),
+        "org files stored in WebDAV at {} (max upload {} MB)",
+        storage.base(),
         args.max_upload_mb
     );
     // One quick request. Never refuse to start: file requests answer 503 until it is back.
