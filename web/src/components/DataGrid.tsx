@@ -224,8 +224,8 @@ export function DataGrid<T>(props: {
           </Button>
         </Show>
         <div class="ml-auto flex h-9 items-center gap-4">
-          <Switch label="Compact" hint="One line per row, all the same height" on={compact()} onChange={setCompactGrids} />
-          <Switch label="Wide" hint="Use the full width of the window" on={wideGrids()} onChange={setWideGrids} />
+          <ToggleSwitch label="Compact" hint="One line per row, all the same height" on={compact()} onChange={setCompactGrids} />
+          <ToggleSwitch label="Wide" hint="Use the full width of the window" on={wideGrids()} onChange={setWideGrids} />
         </div>
       </div>
 
@@ -350,8 +350,11 @@ export function DataGrid<T>(props: {
   );
 }
 
-/** A labelled on/off switch. */
-function Switch(props: { label: string; hint: string; on: boolean; onChange: (on: boolean) => void }) {
+/**
+ * A labelled on/off switch. Not named `Switch`: Solid's compiler turns every `<Switch>` tag into
+ * its built-in control-flow component, even when a local component has that name.
+ */
+function ToggleSwitch(props: { label: string; hint: string; on: boolean; onChange: (on: boolean) => void }) {
   return (
     <button
       type="button"
