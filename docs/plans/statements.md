@@ -261,3 +261,12 @@ choice, not a column:
   afresh (filters and paging reset).
 - Type rules stay per organisation.
 
+
+## Step 10: Status bar ✅
+
+Each grid ends in a status bar that sticks to the bottom of the window: the row count ("12 of 240
+rows"), the page's own figures, paging, and the Compact and Wide switches (moved from the toolbar).
+Transactions shows the **sum of Amount** for the filtered rows (per currency; money in and out in
+its tooltip) only while a filter or search is on. Uploads shows how many rows the listed statements
+hold. The separate summary line under the toolbar is gone; the multi-column sort hint is now the
+header buttons' tooltip.

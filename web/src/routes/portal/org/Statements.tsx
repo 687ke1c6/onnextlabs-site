@@ -367,7 +367,7 @@ function UploadsList(props: { acct: ReturnType<typeof useStatementAccount> }) {
                 </div>
               );
             }}
-            summary={(shown) => <span>{shown.reduce((n, u) => n + u.rows_parsed, 0)} rows in these statements</span>}
+            status={(shown) => <span class="tabular-nums">{shown.reduce((n, u) => n + u.rows_parsed, 0)} rows in them</span>}
           />
         )}
       </Show>

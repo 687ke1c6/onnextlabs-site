@@ -97,8 +97,11 @@ export function DataGrid<T>(props: {
   defaultHidden?: string[];
   /** Extra toolbar controls (e.g. a date range), given access to the filters. */
   toolbar?: (api: GridApi) => JSX.Element;
-  /** Under the toolbar: given the rows that pass the filters. */
-  summary?: (rows: T[]) => JSX.Element;
+  /**
+   * Extra figures for the status bar, given the rows that pass the filters and whether any
+   * filter or search is active (e.g. a sum, shown only when filtering).
+   */
+  status?: (rows: T[], filtering: boolean) => JSX.Element;
   /** e.g. ["row", "rows"]. */
   noun: [string, string];
 }) {
@@ -223,17 +226,6 @@ export function DataGrid<T>(props: {
             <X size={16} /> Clear
           </Button>
         </Show>
-        <div class="ml-auto flex h-9 items-center gap-4">
-          <ToggleSwitch label="Compact" hint="One line per row, all the same height" on={compact()} onChange={setCompactGrids} />
-          <ToggleSwitch label="Wide" hint="Use the full width of the window" on={wideGrids()} onChange={setWideGrids} />
-        </div>
-      </div>
-
-      {/* What's shown */}
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        <span>{filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}</span>
-        {props.summary?.(filtered())}
-        <span class="hidden sm:inline">Shift-click headers to sort by more than one column.</span>
       </div>
 
       {/* Table */}
@@ -256,6 +248,7 @@ export function DataGrid<T>(props: {
                             <button
                               type="button"
                               onClick={h.column.getToggleSortingHandler()}
+                              title="Sort (shift-click to sort by more than one column)"
                               class={cn(
                                 "inline-flex items-center gap-1 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                 sorted() && "text-foreground",
@@ -326,24 +319,38 @@ export function DataGrid<T>(props: {
         </table>
       </div>
 
-      {/* Pagination */}
-      <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
-        <label class="flex items-center gap-2 text-muted-foreground">
-          Per page
-          <select class={cn(SELECT, "h-8 px-2")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
-            <For each={PAGE_SIZES}>{(n) => <option value={n}>{n}</option>}</For>
-          </select>
-        </label>
-        <div class="flex items-center gap-2">
-          <span class="tabular-nums text-muted-foreground">
+      {/* Status bar: what's shown (and its sum when filtering), paging, view switches. It sticks
+          to the bottom of the window, so the figures stay in view while scrolling. */}
+      <div
+        role="status"
+        class="sticky bottom-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow-sm backdrop-blur"
+      >
+        <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+          <span class="tabular-nums">
+            {filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}
+          </span>
+          {props.status?.(filtered(), anyFilter())}
+        </div>
+        <div class="flex flex-wrap items-center gap-2 sm:ml-auto">
+          <label class="flex items-center gap-1.5">
+            Per page
+            <select class={cn(SELECT, "h-7 px-1.5 text-xs")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
+              <For each={PAGE_SIZES}>{(n) => <option value={n}>{n}</option>}</For>
+            </select>
+          </label>
+          <span class="tabular-nums">
             {firstShown()}–{lastShown()} of {filtered().length}
           </span>
-          <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} aria-label="Previous page">
-            <ChevronLeft size={16} />
+          <Button variant="outline" size="sm" class="h-7 px-2" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} aria-label="Previous page">
+            <ChevronLeft size={14} />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} aria-label="Next page">
-            <ChevronRight size={16} />
+          <Button variant="outline" size="sm" class="h-7 px-2" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} aria-label="Next page">
+            <ChevronRight size={14} />
           </Button>
+        </div>
+        <div class="flex items-center gap-4 sm:border-l sm:border-border sm:pl-4">
+          <ToggleSwitch label="Compact" hint="One line per row, all the same height" on={compact()} onChange={setCompactGrids} />
+          <ToggleSwitch label="Wide" hint="Use the full width of the window" on={wideGrids()} onChange={setWideGrids} />
         </div>
       </div>
     </div>
@@ -362,7 +369,7 @@ function ToggleSwitch(props: { label: string; hint: string; on: boolean; onChang
       aria-checked={props.on}
       title={props.hint}
       onClick={() => props.onChange(!props.on)}
-      class="inline-flex items-center gap-2 rounded text-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="inline-flex items-center gap-2 rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       <span
         class={cn(

@@ -97,9 +97,12 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
   },
 ];
 
-/** Money in, money out and net of the rows shown, per currency. */
-function Totals(props: { rows: OrgTransaction[] }) {
-  const totals = createMemo(() => {
+/**
+ * The sum of Amount over the filtered rows, per currency (money in and out in its tooltip).
+ * Only while a filter or search is on: unfiltered, it would just be the account's whole history.
+ */
+function FilteredSum(props: { rows: OrgTransaction[] }) {
+  const sums = createMemo(() => {
     const by = new Map<string, { in: number; out: number }>();
     for (const t of props.rows) {
       const v = amountValue(t.amount);
@@ -112,12 +115,16 @@ function Totals(props: { rows: OrgTransaction[] }) {
     return [...by.entries()];
   });
   const fmt = (n: number) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const signed = (n: number) => (n < 0 ? `−${fmt(-n)}` : fmt(n));
   return (
-    <For each={totals()}>
+    <For each={sums()}>
       {([currency, t]) => (
-        <span class="whitespace-nowrap">
-          {currency}: <span class="text-emerald-600 dark:text-emerald-400">+{fmt(t.in)}</span> / <span>−{fmt(Math.abs(t.out))}</span> · net{" "}
-          <span class="font-medium text-foreground">{fmt(t.in + t.out)}</span>
+        <span class="whitespace-nowrap" title={`In ${fmt(t.in)} · out ${fmt(-t.out)}`}>
+          Sum{" "}
+          <span class={cn("font-semibold tabular-nums", t.in + t.out < 0 ? "text-foreground" : "text-emerald-600 dark:text-emerald-400")}>
+            {signed(t.in + t.out)}
+          </span>{" "}
+          {currency}
         </span>
       )}
     </For>
@@ -195,7 +202,11 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
                   </div>
                 );
               }}
-              summary={(shown) => <Totals rows={shown} />}
+              status={(shown, filtering) => (
+                <Show when={filtering && shown.length > 0}>
+                  <FilteredSum rows={shown} />
+                </Show>
+              )}
             />
           </Show>
         )}
