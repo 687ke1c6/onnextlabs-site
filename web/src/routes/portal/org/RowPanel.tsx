@@ -13,7 +13,6 @@ import { Input } from "~/components/ui/input";
 import { fetchAllDocuments } from "~/lib/documents";
 import { can } from "~/lib/orgs";
 import {
-  accountLabel,
   attachDocument,
   detachDocument,
   fetchRow,
@@ -142,7 +141,12 @@ export function RowPanel(props: {
                     </div>
                     <div>
                       <dt class="text-xs text-muted-foreground">Account</dt>
-                      <dd>{accountLabel(r().account_number)}</dd>
+                      <dd class="truncate">
+                        {r().account_name}
+                        <Show when={r().account_identifier}>
+                          <span class="ml-1 font-mono text-xs text-muted-foreground">{r().account_identifier}</span>
+                        </Show>
+                      </dd>
                     </div>
                     <div>
                       <dt class="text-xs text-muted-foreground">Id</dt>

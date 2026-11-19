@@ -58,6 +58,7 @@ pub struct Impact {
 fn label(table: &str) -> &'static str {
     match table {
         "organisations" => "organisation",
+        "statement_accounts" => "accounts",
         "org_members" => "memberships (the people's accounts stay)",
         "documents" => "documents (database entries only; files in storage stay)",
         "statement_uploads" => "saved statements",
@@ -305,8 +306,13 @@ mod tests {
         )
         .await;
         exec(&db, "INSERT INTO documents (id, org_id, folder, filename, size, uploaded_by) VALUES (1, 1, '', 's.csv', 1, 1), (2, 2, '', 'other.pdf', 1, 1)").await;
-        exec(&db, "INSERT INTO statement_uploads (id, org_id, format, filename, sha256, rows_parsed, rows_new, rows_updated, document_id, uploaded_by) VALUES (1, 1, 'sb_csv', 's.csv', 'x', 2, 2, 0, 1, 1)").await;
-        exec(&db, "INSERT INTO statement_transactions (id, org_id, txn_id, date, amount, description, currency) VALUES (1, 1, 1, '2027-01-01', '1', 'a', 'ZAR'), (2, 1, 2, '2027-01-02', '2', 'b', 'ZAR')").await;
+        exec(
+            &db,
+            "INSERT INTO statement_accounts (id, org_id, name) VALUES (1, 1, 'Main')",
+        )
+        .await;
+        exec(&db, "INSERT INTO statement_uploads (id, org_id, account_id, format, filename, sha256, rows_parsed, rows_new, rows_updated, document_id, uploaded_by) VALUES (1, 1, 1, 'sb_csv', 's.csv', 'x', 2, 2, 0, 1, 1)").await;
+        exec(&db, "INSERT INTO statement_transactions (id, org_id, account_id, txn_id, date, amount, description, currency) VALUES (1, 1, 1, 1, '2027-01-01', '1', 'a', 'ZAR'), (2, 1, 1, 2, '2027-01-02', '2', 'b', 'ZAR')").await;
         exec(&db, "INSERT INTO statement_upload_transactions (upload_id, transaction_id, position) VALUES (1, 1, 0), (1, 2, 1)").await;
         exec(&db, "INSERT INTO statement_transaction_documents (transaction_id, document_id) VALUES (1, 1)").await;
         exec(
@@ -334,6 +340,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(count("statement_types", OnDelete::Delete), Some(1));
+        assert_eq!(count("statement_accounts", OnDelete::Delete), Some(1));
         // The upload is deleted anyway, so it isn't also listed as "link cleared".
         assert_eq!(count("statement_uploads", OnDelete::Unlink), None);
         // Never up: the user and the other org are untouched.

@@ -47,7 +47,10 @@ pub fn routes() -> Router<Arc<AppState>> {
 struct RowFields {
     id: i64,
     txn_id: i64,
-    account_number: String,
+    account_id: i64,
+    account_name: String,
+    /// The account's identifier, if it has one.
+    account_identifier: Option<String>,
     date: String,
     amount: String,
     description: String,
@@ -94,9 +97,11 @@ struct RowDetail {
 
 async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Response> {
     let row: RowFields = sqlx::query_as(
-        "SELECT id, txn_id, account_number, date, amount, description, currency, type, type_manual,
-                updated_at
-         FROM statement_transactions WHERE id = ? AND org_id = ?",
+        "SELECT t.id, t.txn_id, t.account_id, a.name AS account_name,
+                a.identifier AS account_identifier, t.date, t.amount, t.description, t.currency,
+                t.type, t.type_manual, t.updated_at
+         FROM statement_transactions t JOIN statement_accounts a ON a.id = t.account_id
+         WHERE t.id = ? AND t.org_id = ?",
     )
     .bind(id)
     .bind(org.id)
@@ -288,11 +293,19 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        let row = sqlx::query_scalar(
-            "INSERT INTO statement_transactions (org_id, txn_id, date, amount, description, currency)
-             VALUES (?, 1, '2027-01-01', '-1', 'X', 'ZAR') RETURNING id",
+        let account: i64 = sqlx::query_scalar(
+            "INSERT INTO statement_accounts (org_id, name) VALUES (?, 'Main') RETURNING id",
         )
         .bind(org)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let row = sqlx::query_scalar(
+            "INSERT INTO statement_transactions (org_id, account_id, txn_id, date, amount, description, currency)
+             VALUES (?, ?, 1, '2027-01-01', '-1', 'X', 'ZAR') RETURNING id",
+        )
+        .bind(org)
+        .bind(account)
         .fetch_one(&db)
         .await
         .unwrap();

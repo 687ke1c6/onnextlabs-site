@@ -38,6 +38,8 @@ use statements_core::{
     statement::{self, Format, Statement, Transaction},
 };
 
+use crate::statement_accounts::{self, Account};
+
 use crate::{
     api::{bad_request, db_error, error, not_found},
     auth::CurrentUser,
@@ -123,13 +125,12 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
             "/api/orgs/{org}/statements/{id}/delete-impact",
             get(delete_preview),
         )
-        .route("/api/orgs/{org}/statement-accounts", get(accounts))
         .route(
             "/api/orgs/{org}/statement-transactions",
             get(all_transactions),
         )
         .route(
-            "/api/orgs/{org}/statement-rules",
+            "/api/orgs/{org}/statement-accounts/{id}/rules",
             get(get_rules).put(put_rules),
         )
         .route("/api/orgs/{org}/statement-rules/test", post(test_rules))
@@ -140,6 +141,8 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
 struct UploadForm {
     filename: String,
     bytes: Bytes,
+    /// `account`: the account (id) the statement is for.
+    account: Option<i64>,
     /// `types`: JSON `{"<n8n id>": "TYPE" | null}`, the types picked in the preview.
     types: Option<String>,
 }
@@ -147,10 +150,11 @@ struct UploadForm {
 /// Types picked by hand in the preview, by n8n id: a type, or `None` to clear it.
 type Picks = HashMap<i32, Option<String>>;
 
-/// Multipart fields: `file` (required), `types` (optional, see `UploadForm`).
+/// Multipart fields: `file` and `account` (required), `types` (optional, see `UploadForm`).
 async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadForm, Response> {
     let mut file = None;
     let mut types = None;
+    let mut account = None;
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
         match field.name() {
             Some("file") => {
@@ -159,6 +163,14 @@ async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadFor
                 file = Some((name, bytes));
             }
             Some("types") => types = Some(field.text().await.map_err(multipart_error)?),
+            Some("account") => {
+                let text = field.text().await.map_err(multipart_error)?;
+                account = Some(
+                    text.trim()
+                        .parse()
+                        .map_err(|_| bad_request("Unknown account."))?,
+                );
+            }
             _ => {}
         }
     }
@@ -178,6 +190,7 @@ async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadFor
     Ok(UploadForm {
         filename,
         bytes,
+        account,
         types,
     })
 }
@@ -248,8 +261,44 @@ fn display_name(name: &str) -> String {
     }
 }
 
-fn account_of(statement: &Statement) -> String {
+/// The account number the statement states ('' when its format doesn't state one).
+fn stated_account(statement: &Statement) -> String {
     statement.account_number.clone().unwrap_or_default()
+}
+
+/// The account the upload is for: required, and in this org.
+async fn target_account(
+    db: &SqlitePool,
+    org_id: i64,
+    form: &UploadForm,
+) -> Result<Account, Response> {
+    let id = form
+        .account
+        .ok_or_else(|| bad_request("Choose the account this statement is for."))?;
+    statement_accounts::find(db, org_id, id).await
+}
+
+/// How the account number a statement states compares with the account's identifier.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AccountCheck {
+    /// The statement's number is the account's identifier.
+    Match,
+    /// They differ: saving is allowed, but it's probably the wrong account.
+    Mismatch,
+    /// The account has no identifier to compare with.
+    NoIdentifier,
+    /// The statement doesn't state an account number.
+    NotStated,
+}
+
+fn check_account(account: &Account, stated: &str) -> AccountCheck {
+    match (stated.trim(), account.identifier.as_deref().map(str::trim)) {
+        ("", _) => AccountCheck::NotStated,
+        (_, None) => AccountCheck::NoIdentifier,
+        (s, Some(i)) if s == i => AccountCheck::Match,
+        _ => AccountCheck::Mismatch,
+    }
 }
 
 // ---- preview ----
@@ -261,6 +310,11 @@ struct Preview {
     format_name: &'static str,
     /// As stated in the file, if the format states one.
     account_number: Option<String>,
+    /// The account it would be saved into, and how the stated number compares with it.
+    account: Account,
+    account_check: AccountCheck,
+    /// On a mismatch: another account whose identifier is the stated number, if there is one.
+    suggested_account: Option<Account>,
     first_date: Option<String>,
     last_date: Option<String>,
     /// Rows in the file.
@@ -303,9 +357,17 @@ async fn preview(
 ) -> Result<Json<Preview>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     let form = read_form(multipart, state.max_upload_bytes).await?;
-    let rules = org_rules(&state.db, org.id).await?;
+    let account = target_account(&state.db, org.id, &form).await?;
+    let rules = account_rules(&state.db, account.id).await?;
     let st = parse_statement(&form.bytes, &rules)?;
-    let stored = stored_types(&state.db, org.id, &account_of(&st)).await?;
+    let stored = stored_types(&state.db, account.id).await?;
+    let stated = stated_account(&st);
+    let account_check = check_account(&account, &stated);
+    let suggested_account = if account_check == AccountCheck::Mismatch {
+        statement_accounts::with_identifier(&state.db, org.id, &stated).await?
+    } else {
+        None
+    };
     let txs = &st.transactions;
     // (type, hand-set) as saving would leave it.
     let effective = |t: &Transaction| match stored.get(&t.id) {
@@ -343,23 +405,23 @@ async fn preview(
                 }
             })
             .collect(),
-        documents_folder: statement_folder(&account_of(&st)),
+        documents_folder: statement_folder(&account.name),
         existing_document,
+        account,
+        account_check,
+        suggested_account,
     }))
 }
 
-/// The rows already stored for this org and account: n8n id -> (type, hand-set).
+/// The rows already stored in this account: n8n id -> (type, hand-set).
 async fn stored_types(
     db: &SqlitePool,
-    org_id: i64,
-    account: &str,
+    account_id: i64,
 ) -> Result<HashMap<i32, (Option<String>, bool)>, Response> {
     let rows: Vec<(i64, Option<String>, bool)> = sqlx::query_as(
-        "SELECT txn_id, type, type_manual FROM statement_transactions
-         WHERE org_id = ? AND account_number = ?",
+        "SELECT txn_id, type, type_manual FROM statement_transactions WHERE account_id = ?",
     )
-    .bind(org_id)
-    .bind(account)
+    .bind(account_id)
     .fetch_all(db)
     .await
     .map_err(db_error)?;
@@ -382,7 +444,9 @@ async fn save(
 ) -> Result<(StatusCode, Json<UploadDetail>), Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     let form = read_form(multipart, state.max_upload_bytes).await?;
-    let rules = org_rules(&state.db, org.id).await?;
+    // A mismatch with the account's identifier is shown in the preview, never refused here.
+    let account = target_account(&state.db, org.id, &form).await?;
+    let rules = account_rules(&state.db, account.id).await?;
     let st = parse_statement(&form.bytes, &rules)?;
     let picks = read_picks(&state.db, org.id, form.types.as_deref(), &st).await?;
     let sha256 = hex::encode(Sha256::digest(&form.bytes));
@@ -396,7 +460,7 @@ async fn save(
                 &state,
                 &org,
                 user.id,
-                &statement_folder(&account_of(&st)),
+                &statement_folder(&account.name),
                 &form.filename,
                 Some("text/csv".into()),
                 form.bytes.clone(),
@@ -410,6 +474,7 @@ async fn save(
     let upload_id = store_with(
         &state.db,
         &org,
+        account.id,
         user.id,
         &form.filename,
         &sha256,
@@ -433,7 +498,31 @@ async fn save(
     Ok((StatusCode::CREATED, Json(detail)))
 }
 
-/// `store_with` and no types picked by hand.
+/// Tests: the account whose identifier is `stated` (created if needed; '' = "No account
+/// stated", with no identifier), as the migration does for existing data.
+#[cfg(test)]
+async fn test_account(db: &SqlitePool, org_id: i64, stated: &str) -> i64 {
+    let identifier = Some(stated).filter(|s| !s.is_empty());
+    let name = identifier.unwrap_or("No account stated");
+    sqlx::query(
+        "INSERT OR IGNORE INTO statement_accounts (org_id, name, identifier) VALUES (?, ?, ?)",
+    )
+    .bind(org_id)
+    .bind(name)
+    .bind(identifier)
+    .execute(db)
+    .await
+    .unwrap();
+    sqlx::query_scalar("SELECT id FROM statement_accounts WHERE org_id = ? AND name = ?")
+        .bind(org_id)
+        .bind(name)
+        .fetch_one(db)
+        .await
+        .unwrap()
+}
+
+/// `store_with` with no types picked by hand, into the account whose identifier is the
+/// statement's stated number (created if needed, as the migration did).
 #[cfg(test)]
 async fn store(
     db: &SqlitePool,
@@ -444,9 +533,11 @@ async fn store(
     st: &Statement,
     document_id: Option<i64>,
 ) -> sqlx::Result<i64> {
+    let account = test_account(db, org.id, &stated_account(st)).await;
     store_with(
         db,
         org,
+        account,
         user_id,
         filename,
         sha256,
@@ -458,7 +549,7 @@ async fn store(
 }
 
 /// One database transaction: the upload row, then each statement row upserted on
-/// `(org, account, n8n id)` and linked to the upload in file order.
+/// `(account, n8n id)` and linked to the upload in file order.
 ///
 /// Types: a type picked in the preview (`picks`) is stored as hand-set; clearing one there
 /// stores the row blank and not hand-set. Otherwise a stored hand-set type is kept, and a
@@ -467,6 +558,7 @@ async fn store(
 async fn store_with(
     db: &SqlitePool,
     org: &Org,
+    account_id: i64,
     user_id: i64,
     filename: &str,
     sha256: &str,
@@ -474,17 +566,17 @@ async fn store_with(
     document_id: Option<i64>,
     picks: &Picks,
 ) -> sqlx::Result<i64> {
-    let account = account_of(st);
     let mut tx = db.begin().await?;
     let upload_id: i64 = sqlx::query_scalar(
         "INSERT INTO statement_uploads
-             (org_id, format, account_number, filename, sha256, rows_parsed, rows_new,
+             (org_id, account_id, format, account_number, filename, sha256, rows_parsed, rows_new,
               rows_updated, document_id, uploaded_by)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?) RETURNING id",
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?) RETURNING id",
     )
     .bind(org.id)
+    .bind(account_id)
     .bind(st.format.id())
-    .bind(&account)
+    .bind(stated_account(st))
     .bind(filename)
     .bind(sha256)
     .bind(st.transactions.len() as i64)
@@ -496,11 +588,9 @@ async fn store_with(
     let (mut new, mut updated) = (0i64, 0i64);
     for (position, t) in st.transactions.iter().enumerate() {
         let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM statement_transactions
-             WHERE org_id = ? AND account_number = ? AND txn_id = ?",
+            "SELECT id FROM statement_transactions WHERE account_id = ? AND txn_id = ?",
         )
-        .bind(org.id)
-        .bind(&account)
+        .bind(account_id)
         .bind(t.id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -554,12 +644,12 @@ async fn store_with(
                 };
                 sqlx::query_scalar(
                     "INSERT INTO statement_transactions
-                         (org_id, account_number, txn_id, date, amount, description, currency, type,
+                         (org_id, account_id, txn_id, date, amount, description, currency, type,
                           type_manual)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 )
                 .bind(org.id)
-                .bind(&account)
+                .bind(account_id)
                 .bind(t.id)
                 .bind(&t.date)
                 .bind(&t.amount)
@@ -598,6 +688,10 @@ async fn store_with(
 pub struct UploadSummary {
     pub id: i64,
     pub format: String,
+    /// The account it was saved into.
+    pub account_id: i64,
+    pub account_name: String,
+    /// The account number the file itself states ('' if none).
     pub account_number: String,
     pub filename: String,
     pub rows_parsed: i64,
@@ -615,7 +709,8 @@ pub struct UploadSummary {
 macro_rules! select_upload {
     ($tail:literal) => {
         concat!(
-            "SELECT u.id, u.format, u.account_number, u.filename, u.rows_parsed, u.rows_new,
+            "SELECT u.id, u.format, u.account_id, a.name AS account_name, u.account_number,
+                    u.filename, u.rows_parsed, u.rows_new,
                     u.rows_updated, u.document_id, u.uploaded_at,
                     coalesce(us.name, us.email) AS uploaded_by,
                     (SELECT min(t.date) FROM statement_upload_transactions l
@@ -624,7 +719,9 @@ macro_rules! select_upload {
                     (SELECT max(t.date) FROM statement_upload_transactions l
                          JOIN statement_transactions t ON t.id = l.transaction_id
                          WHERE l.upload_id = u.id) AS last_date
-             FROM statement_uploads u LEFT JOIN users us ON us.id = u.uploaded_by ",
+             FROM statement_uploads u
+             JOIN statement_accounts a ON a.id = u.account_id
+             LEFT JOIN users us ON us.id = u.uploaded_by ",
             $tail
         )
     };
@@ -651,46 +748,10 @@ pub struct UploadDetail {
     pub transactions: Vec<StoredTransaction>,
 }
 
-/// `?account=<number>`: only that account ('' = statements that state none). Absent = all.
+/// `?account=<id>`: only that account. Absent = all of the org's.
 #[derive(Deserialize)]
 struct AccountQuery {
-    account: Option<String>,
-}
-
-/// An account the org has statements for.
-#[derive(Serialize, sqlx::FromRow)]
-struct AccountSummary {
-    /// '' when the statements don't state one.
-    account_number: String,
-    uploads: i64,
-    rows: i64,
-    last_uploaded_at: String,
-}
-
-/// GET /api/orgs/{org}/statement-accounts — accounts with statements, most recently uploaded
-/// first.
-async fn accounts(
-    user: CurrentUser,
-    State(state): State<Arc<AppState>>,
-    UrlPath(slug): UrlPath<String>,
-) -> Result<Json<Vec<AccountSummary>>, Response> {
-    let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
-    Ok(Json(
-        org_accounts(&state.db, org.id).await.map_err(db_error)?,
-    ))
-}
-
-async fn org_accounts(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<AccountSummary>> {
-    sqlx::query_as(
-        "SELECT u.account_number, count(*) AS uploads, max(u.uploaded_at) AS last_uploaded_at,
-                (SELECT count(*) FROM statement_transactions t
-                 WHERE t.org_id = u.org_id AND t.account_number = u.account_number) AS rows
-         FROM statement_uploads u WHERE u.org_id = ?
-         GROUP BY u.account_number ORDER BY last_uploaded_at DESC, max(u.id) DESC",
-    )
-    .bind(org_id)
-    .fetch_all(db)
-    .await
+    account: Option<i64>,
 }
 
 /// GET /api/orgs/{org}/statements?account= — the org's uploads, newest first.
@@ -702,7 +763,7 @@ async fn list(
 ) -> Result<Json<Vec<UploadSummary>>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
     let uploads = sqlx::query_as(select_upload!(
-        "WHERE u.org_id = ?1 AND (?2 IS NULL OR u.account_number = ?2)
+        "WHERE u.org_id = ?1 AND (?2 IS NULL OR u.account_id = ?2)
          ORDER BY u.uploaded_at DESC, u.id DESC"
     ))
     .bind(org.id)
@@ -759,7 +820,7 @@ struct OrgTransaction {
     /// The row's own id (for editing it); `txn_id` is the n8n id.
     id: i64,
     txn_id: i64,
-    account_number: String,
+    account_id: i64,
     date: String,
     /// e.g. "Aug 2024", derived from `date` exactly as the sheet's `month` column is.
     #[sqlx(skip)]
@@ -790,7 +851,7 @@ async fn all_transactions(
 ) -> Result<Json<Vec<OrgTransaction>>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
     Ok(Json(
-        org_transactions(&state.db, org.id, q.account.as_deref())
+        org_transactions(&state.db, org.id, q.account)
             .await
             .map_err(db_error)?,
     ))
@@ -799,10 +860,10 @@ async fn all_transactions(
 async fn org_transactions(
     db: &SqlitePool,
     org_id: i64,
-    account: Option<&str>,
+    account: Option<i64>,
 ) -> sqlx::Result<Vec<OrgTransaction>> {
     sqlx::query_as(
-        "SELECT t.id, t.txn_id, t.account_number, t.date, t.amount, t.description, t.currency, t.type,
+        "SELECT t.id, t.txn_id, t.account_id, t.date, t.amount, t.description, t.currency, t.type,
                 t.type_manual,
                 (SELECT count(*) FROM statement_transaction_documents d WHERE d.transaction_id = t.id)
                     AS attachments,
@@ -811,7 +872,7 @@ async fn org_transactions(
          LEFT JOIN statement_uploads u ON u.id = (
              SELECT max(l.upload_id) FROM statement_upload_transactions l
              WHERE l.transaction_id = t.id)
-         WHERE t.org_id = ?1 AND (?2 IS NULL OR t.account_number = ?2)
+         WHERE t.org_id = ?1 AND (?2 IS NULL OR t.account_id = ?2)
          ORDER BY t.date DESC, t.id DESC",
     )
     .bind(org_id)
@@ -940,7 +1001,7 @@ async fn delete_upload(db: &SqlitePool, org_id: i64, id: i64) -> sqlx::Result<Op
 // ---- type rules ----
 
 /// A type rule as the API and the database hold it: `contains` as typed (matching ignores
-/// case), formats by id.
+/// case). Rules belong to an account.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RuleJson {
     #[serde(rename = "type")]
@@ -950,8 +1011,6 @@ pub struct RuleJson {
     pub min_amount: Option<f64>,
     #[serde(default)]
     pub max_amount: Option<f64>,
-    #[serde(default)]
-    pub formats: Vec<String>,
 }
 
 impl RuleJson {
@@ -969,17 +1028,12 @@ impl RuleJson {
         {
             return Err("a text to look for is too long".into());
         }
-        let formats = self
-            .formats
-            .iter()
-            .map(|f| Format::from_id(f).ok_or_else(|| format!("unknown format {f:?}")))
-            .collect::<Result<Vec<_>, _>>()?;
         CategoryRule::new(
             &self.category,
             &self.contains,
             self.min_amount,
             self.max_amount,
-            formats,
+            vec![],
         )
         .map_err(|e| e.to_string())
     }
@@ -1007,15 +1061,14 @@ struct RuleRow {
     contains: String,
     min_amount: Option<f64>,
     max_amount: Option<f64>,
-    formats: String,
 }
 
-async fn load_rules(db: &SqlitePool, org_id: i64) -> Result<Vec<RuleJson>, Response> {
+async fn load_rules(db: &SqlitePool, account_id: i64) -> Result<Vec<RuleJson>, Response> {
     let rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT type, contains, min_amount, max_amount, formats FROM statement_type_rules
-         WHERE org_id = ? ORDER BY position, id",
+        "SELECT type, contains, min_amount, max_amount FROM statement_type_rules
+         WHERE account_id = ? ORDER BY position, id",
     )
-    .bind(org_id)
+    .bind(account_id)
     .fetch_all(db)
     .await
     .map_err(db_error)?;
@@ -1026,22 +1079,24 @@ async fn load_rules(db: &SqlitePool, org_id: i64) -> Result<Vec<RuleJson>, Respo
             contains: serde_json::from_str(&r.contains).unwrap_or_default(),
             min_amount: r.min_amount,
             max_amount: r.max_amount,
-            formats: serde_json::from_str(&r.formats).unwrap_or_default(),
         })
         .collect())
 }
 
-/// The org's rules, ready to apply. Stored rules were checked when saved; any that no longer
-/// pass (e.g. a format that was removed) are skipped.
-pub async fn org_rules(db: &SqlitePool, org_id: i64) -> Result<Vec<CategoryRule>, Response> {
-    Ok(load_rules(db, org_id)
+/// The account's rules, ready to apply. Stored rules were checked when saved; any that no
+/// longer pass are skipped.
+pub async fn account_rules(
+    db: &SqlitePool,
+    account_id: i64,
+) -> Result<Vec<CategoryRule>, Response> {
+    Ok(load_rules(db, account_id)
         .await?
         .iter()
         .enumerate()
         .filter_map(|(i, r)| match r.to_rule() {
             Ok(rule) => Some(rule),
             Err(e) => {
-                tracing::warn!(org_id, rule = i + 1, error = %e, "skipping invalid type rule");
+                tracing::warn!(account_id, rule = i + 1, error = %e, "skipping invalid type rule");
                 None
             }
         })
@@ -1049,38 +1104,20 @@ pub async fn org_rules(db: &SqlitePool, org_id: i64) -> Result<Vec<CategoryRule>
 }
 
 #[derive(Serialize)]
-struct FormatInfo {
-    id: &'static str,
-    name: &'static str,
-}
-
-#[derive(Serialize)]
 struct RulesResponse {
     rules: Vec<RuleJson>,
-    /// Formats a rule can be limited to.
-    formats: Vec<FormatInfo>,
 }
 
-fn formats() -> Vec<FormatInfo> {
-    Format::ALL
-        .into_iter()
-        .map(|f| FormatInfo {
-            id: f.id(),
-            name: f.description(),
-        })
-        .collect()
-}
-
-/// GET /api/orgs/{org}/statement-rules
+/// GET /api/orgs/{org}/statement-accounts/{id}/rules
 async fn get_rules(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    UrlPath(slug): UrlPath<String>,
+    UrlPath((slug, account_id)): UrlPath<(String, i64)>,
 ) -> Result<Json<RulesResponse>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
+    statement_accounts::find(&state.db, org.id, account_id).await?;
     Ok(Json(RulesResponse {
-        rules: load_rules(&state.db, org.id).await?,
-        formats: formats(),
+        rules: load_rules(&state.db, account_id).await?,
     }))
 }
 
@@ -1089,14 +1126,15 @@ struct RulesBody {
     rules: Vec<RuleJson>,
 }
 
-/// PUT /api/orgs/{org}/statement-rules — replaces the whole ordered list.
+/// PUT /api/orgs/{org}/statement-accounts/{id}/rules — replaces the account's ordered list.
 async fn put_rules(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    UrlPath(slug): UrlPath<String>,
+    UrlPath((slug, account_id)): UrlPath<(String, i64)>,
     Json(body): Json<RulesBody>,
 ) -> Result<Json<RulesResponse>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
+    statement_accounts::find(&state.db, org.id, account_id).await?;
     validate_rules(&body.rules)?;
     let mut body = body;
     for (i, r) in body.rules.iter_mut().enumerate() {
@@ -1113,33 +1151,32 @@ async fn put_rules(
     }
     let save = async {
         let mut tx = state.db.begin().await?;
-        sqlx::query("DELETE FROM statement_type_rules WHERE org_id = ?")
-            .bind(org.id)
+        sqlx::query("DELETE FROM statement_type_rules WHERE account_id = ?")
+            .bind(account_id)
             .execute(&mut *tx)
             .await?;
         for (position, r) in body.rules.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO statement_type_rules
-                     (org_id, position, type, contains, min_amount, max_amount, formats)
+                     (org_id, account_id, position, type, contains, min_amount, max_amount)
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(org.id)
+            .bind(account_id)
             .bind(position as i64)
             .bind(r.category.trim())
             .bind(serde_json::to_string(&r.contains).unwrap_or_else(|_| "[]".into()))
             .bind(r.min_amount)
             .bind(r.max_amount)
-            .bind(serde_json::to_string(&r.formats).unwrap_or_else(|_| "[]".into()))
             .execute(&mut *tx)
             .await?;
         }
         tx.commit().await
     };
     save.await.map_err(db_error)?;
-    tracing::info!(org = %org.slug, rules = body.rules.len(), user = user.id, "type rules saved");
+    tracing::info!(org = %org.slug, account = account_id, rules = body.rules.len(), user = user.id, "type rules saved");
     Ok(Json(RulesResponse {
-        rules: load_rules(&state.db, org.id).await?,
-        formats: formats(),
+        rules: load_rules(&state.db, account_id).await?,
     }))
 }
 
@@ -1149,9 +1186,6 @@ struct TestBody {
     rules: Vec<RuleJson>,
     description: String,
     amount: String,
-    /// Defaults to the first known format.
-    #[serde(default)]
-    format: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1172,10 +1206,8 @@ async fn test_rules(
 ) -> Result<Json<TestResult>, Response> {
     rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
     let rules = validate_rules(&body.rules)?;
-    let format = match body.format.as_deref() {
-        None => Format::ALL[0],
-        Some(id) => Format::from_id(id).ok_or_else(|| bad_request("Unknown format."))?,
-    };
+    // Rules aren't limited by format any more; any format matches the same way.
+    let format = Format::ALL[0];
     let t = Transaction {
         id: 0,
         date: String::new(),
@@ -1215,6 +1247,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stated_account_numbers_are_checked_against_the_identifier() {
+        let account = |identifier: Option<&str>| Account {
+            id: 1,
+            name: "Joint".into(),
+            identifier: identifier.map(Into::into),
+        };
+        assert_eq!(
+            check_account(&account(Some("123")), "123"),
+            AccountCheck::Match
+        );
+        assert_eq!(
+            check_account(&account(Some(" 123 ")), "123"),
+            AccountCheck::Match
+        );
+        assert_eq!(
+            check_account(&account(Some("123")), "999"),
+            AccountCheck::Mismatch
+        );
+        assert_eq!(
+            check_account(&account(None), "123"),
+            AccountCheck::NoIdentifier
+        );
+        assert_eq!(
+            check_account(&account(Some("123")), ""),
+            AccountCheck::NotStated
+        );
+    }
+
+    #[test]
     fn statement_folders_are_safe_and_per_account() {
         assert_eq!(statement_folder("123456789"), "Statements/123456789");
         assert_eq!(statement_folder(""), "Statements/No account");
@@ -1240,7 +1301,6 @@ mod tests {
             contains: contains.iter().map(|s| s.to_string()).collect(),
             min_amount: None,
             max_amount: None,
-            formats: vec![],
         }
     }
 
@@ -1444,7 +1504,8 @@ mod tests {
 
         // New rows: a pick is hand-set; a cleared rule type is stored blank, not hand-set.
         let picks = Picks::from([(plain, Some("MINE".to_string())), (paid, None)]);
-        store_with(&db, &org, user, "a.csv", "x", &typed, None, &picks)
+        let acc = test_account(&db, org.id, "123456789").await;
+        store_with(&db, &org, acc, user, "a.csv", "x", &typed, None, &picks)
             .await
             .unwrap();
         let rows = org_transactions(&db, org.id, None).await.unwrap();
@@ -1461,7 +1522,7 @@ mod tests {
 
         // A pick also replaces an existing hand-set type.
         let picks = Picks::from([(plain, Some("OTHER".to_string()))]);
-        store_with(&db, &org, user, "a.csv", "x", &typed, None, &picks)
+        store_with(&db, &org, acc, user, "a.csv", "x", &typed, None, &picks)
             .await
             .unwrap();
         let rows = org_transactions(&db, org.id, None).await.unwrap();
@@ -1542,30 +1603,30 @@ mod tests {
             org_transactions(&db, org.id, None).await.unwrap().len(),
             n + 3
         );
-        let mine = org_transactions(&db, org.id, Some("123456789"))
-            .await
-            .unwrap();
+        let main = test_account(&db, org.id, "123456789").await;
+        let other_account = test_account(&db, org.id, "999").await;
+        let mine = org_transactions(&db, org.id, Some(main)).await.unwrap();
         assert_eq!(mine.len(), n);
-        assert!(mine.iter().all(|r| r.account_number == "123456789"));
+        assert!(mine.iter().all(|r| r.account_id == main));
         assert_eq!(
-            org_transactions(&db, org.id, Some("999"))
+            org_transactions(&db, org.id, Some(other_account))
                 .await
                 .unwrap()
                 .len(),
             3
         );
-        assert!(org_transactions(&db, org.id, Some(""))
+        assert!(org_transactions(&db, org.id, Some(other_account + 100))
             .await
             .unwrap()
             .is_empty());
 
-        let accounts = org_accounts(&db, org.id).await.unwrap();
+        let accounts = statement_accounts::org_accounts(&db, org.id).await.unwrap();
         let summary: Vec<(&str, i64, i64)> = accounts
             .iter()
-            .map(|a| (a.account_number.as_str(), a.uploads, a.rows))
+            .map(|a| (a.name.as_str(), a.uploads, a.rows))
             .collect();
-        // Most recently uploaded first.
-        assert_eq!(summary, [("999", 1, 3), ("123456789", 1, n as i64)]);
+        // By name.
+        assert_eq!(summary, [("123456789", 1, n as i64), ("999", 1, 3)]);
     }
 
     #[tokio::test]
@@ -1606,10 +1667,7 @@ mod tests {
     #[test]
     fn rules_are_validated_with_their_position() {
         assert!(validate_rules(&[rule("FEES", &["fee"])]).is_ok());
-        let mut bad_format = rule("X", &["a"]);
-        bad_format.formats = vec!["pdf".into()];
         assert!(rule("X", &[]).to_rule().is_err());
-        assert!(bad_format.to_rule().unwrap_err().contains("unknown format"));
         assert!(rule(&"x".repeat(201), &["a"]).to_rule().is_err());
         assert!(validate_rules(&vec![rule("X", &["a"]); MAX_RULES + 1]).is_err());
     }

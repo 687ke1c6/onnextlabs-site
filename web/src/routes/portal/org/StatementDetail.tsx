@@ -50,7 +50,7 @@ function Detail() {
           <>
             <PageHeader
               title={u().filename}
-              description={`${u().format_name}, saved ${formatDate(u().uploaded_at)}${u().uploaded_by ? ` by ${u().uploaded_by}` : ""}`}
+              description={`${u().format_name} in ${u().account_name}, saved ${formatDate(u().uploaded_at)}${u().uploaded_by ? ` by ${u().uploaded_by}` : ""}`}
               actions={
                 <div class="flex flex-wrap gap-2">
                   <Show when={u().document_id}>
@@ -72,8 +72,9 @@ function Detail() {
               }
             />
 
-            <dl class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <Fact label="Account" value={u().account_number || "Not stated"} />
+            <dl class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
+              <Fact label="Account" value={u().account_name} />
+              <Fact label="Account in the file" value={u().account_number || "Not stated"} />
               <Fact label="Period" value={formatPeriod(u().first_date, u().last_date)} />
               <Fact label="Rows" value={u().rows_parsed} />
               <Fact label="When saved" value={`${u().rows_new} new, ${u().rows_updated} already saved`} />

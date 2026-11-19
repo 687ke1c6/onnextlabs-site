@@ -13,29 +13,28 @@ import {
   deleteType,
   fetchRules,
   fetchTypes,
-  type FormatInfo,
   renameType,
   type Rule,
   saveRules,
   testRules,
   type TypeInfo,
+  type Account,
 } from "~/lib/statements";
 import { cn, selectValue, settled } from "~/lib/utils";
-import { Allowed, PageHeader } from "~/routes/portal/Layout";
+import { Allowed } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
-import { StatementsTabs } from "~/routes/portal/org/StatementParts";
+import { StatementsShell } from "~/routes/portal/org/StatementsShell";
 
 const errorText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
 /** A rule as edited: texts one per line, amounts as typed. */
-type Draft = { type: string; contains: string; min: string; max: string; format: string };
+type Draft = { type: string; contains: string; min: string; max: string };
 
 const toDraft = (r: Rule): Draft => ({
   type: r.type,
   contains: r.contains.join("\n"),
   min: r.min_amount?.toString() ?? "",
   max: r.max_amount?.toString() ?? "",
-  format: r.formats[0] ?? "",
 });
 
 const amount = (s: string) => (s.trim() === "" ? null : Number(s.trim()));
@@ -46,10 +45,9 @@ const toRule = (d: Draft): Rule => ({
   contains: d.contains.split("\n").filter((l) => l.trim() !== ""),
   min_amount: amount(d.min),
   max_amount: amount(d.max),
-  formats: d.format ? [d.format] : [],
 });
 
-const blank = (): Draft => ({ type: "", contains: "", min: "", max: "", format: "" });
+const blank = (): Draft => ({ type: "", contains: "", min: "", max: "" });
 
 const FIELD = "h-9";
 
@@ -57,7 +55,6 @@ function RuleCard(props: {
   index: number;
   draft: Draft;
   count: number;
-  formats: FormatInfo[];
   /** Type names on the org's list. */
   types: string[];
   editable: boolean;
@@ -131,7 +128,7 @@ function RuleCard(props: {
           />
         </div>
       </div>
-      <div class="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3">
+      <div class="mt-3 grid grid-cols-2 gap-3">
         <div class="flex flex-col gap-1.5">
           <label for={id("min")} class="text-xs text-muted-foreground">Amount at least</label>
           <Input
@@ -155,19 +152,6 @@ function RuleCard(props: {
             disabled={!props.editable}
             placeholder="any"
           />
-        </div>
-        <div class="col-span-2 flex flex-col gap-1.5 md:col-span-1">
-          <label for={id("format")} class="text-xs text-muted-foreground">Statement format</label>
-          <select
-            id={id("format")}
-            value={props.draft.format}
-            onChange={(e) => set({ format: e.currentTarget.value })}
-            disabled={!props.editable}
-            class="h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-          >
-            <option value="">Any format</option>
-            <For each={props.formats}>{(f) => <option value={f.id}>{f.name}</option>}</For>
-          </select>
         </div>
       </div>
     </li>
@@ -406,10 +390,14 @@ function TypesList(props: {
   );
 }
 
-function RulesEditor() {
+function RulesEditor(props: { account: () => Account }) {
   const org = useOrg();
   const editable = () => can(org, "write-statements");
-  const [loaded, { mutate }] = createResource(() => org.slug, fetchRules);
+  // Reloaded when another account is picked (unsaved edits to the previous one are dropped).
+  const [loaded, { mutate }] = createResource(
+    () => props.account().id,
+    (id) => fetchRules(org.slug, id),
+  );
   const [drafts, setDrafts] = createSignal<Draft[]>([]);
   const [saved, setSaved] = createSignal<string>("[]");
   const [saving, setSaving] = createSignal(false);
@@ -476,7 +464,7 @@ function RulesEditor() {
     }
     setSaving(true);
     try {
-      const data = await saveRules(org.slug, rules());
+      const data = await saveRules(org.slug, props.account().id, rules());
       mutate(data);
       setNotice("Saved. New and re-saved statements use these rules.");
     } catch (e) {
@@ -497,9 +485,10 @@ function RulesEditor() {
       />
 
       <p class="max-w-3xl text-sm text-muted-foreground">
-        Rules set each row's <span class="font-medium text-foreground">type</span> when a statement is saved. They're tried in order and
+        These rules belong to <span class="font-medium text-foreground">{props.account().name}</span>: they set each row's{" "}
+        <span class="font-medium text-foreground">type</span> when a statement is saved into this account. They're tried in order and
         the first match wins. A row no rule matches keeps the type it already had. To apply changed rules to rows already saved, save
-        their statement again.
+        their statement again. The types themselves are shared by every account.
       </p>
 
       <Show when={loaded.error}>
@@ -526,7 +515,6 @@ function RulesEditor() {
                       index={i}
                       draft={d()}
                       count={drafts().length}
-                      formats={data().formats}
                       types={typeNames()}
                       editable={editable()}
                       matched={matched() === i}
@@ -576,9 +564,7 @@ export function TypeRulesPage() {
   const org = useOrg();
   return (
     <Allowed when={can(org, "read-statements")}>
-      <PageHeader title="Statements" description={`Bank statements for ${org.name}.`} />
-      <StatementsTabs />
-      <RulesEditor />
+      <StatementsShell>{(_state, account) => <RulesEditor account={account} />}</StatementsShell>
     </Allowed>
   );
 }

@@ -133,33 +133,39 @@ files you add to `data-dav/` by hand show up quickly.
 
 ### Statements
 Each organisation has a **Statements** section (`/portal/<slug>/statements`, needs
-`read-statements`). An **Account** picker at the top chooses which bank account's statements
-the pages show (one at a time; it remembers your last choice). It opens on **Transactions**:
-every row saved for that account, in a grid you can search, filter (month and type from their
-column headers), sort (shift-click for more than one column) and page through, with totals for what's
-shown and a choice of columns. `month` ("Aug 2024") is worked out from the date, exactly as
-the Google Sheet's `month` column is. **Uploads** lists the saved statement files in the same
-kind of grid, and there, someone with `write-statements` drops in a bank statement CSV (only Standard
-Bank CSV so far), checks the preview, and saves it. Saving stores every row in the database:
+`read-statements`), built around **accounts**:
 
-- Each row's id is the n8n hash of its date, description and amount, the same id the
-  existing Google Sheets use. A row is stored once per organisation and account, so saving
-  a statement again (or one that overlaps) updates rows instead of duplicating them.
-- **Types** are a list per organisation (Statements → Type rules): add, rename (renames it
-  on every row and rule) or delete one nobody uses. In the Transactions grid, people with
-  `write-statements` can pick a row's type from the list. A picked type is *hand-set*: saving
-  a statement never changes it. Clearing it lets the next save type the row from the rules.
-- **Documents on rows**: click a row to open its details at the side, with the statement(s)
-  it came from and the documents attached to it. Attach any existing document from Documents
-  (`write-statements` and `read-docs`), or remove a link; the document itself is never
-  changed. The grid's Docs column shows how many each row has.
-- **Type rules** (Statements → Type rules) set each row's `type` when it's saved. They're
-  per organisation and tried in order, and the first match wins. A row no rule matches keeps
-  the type it already had, so re-saving a statement re-applies changed rules without wiping
-  types.
-- The original file is always kept in Documents, in `Statements/<account number>`, saved on
-  the uploader's behalf and **private** (only members with `read-docs` can open it). Saving a
-  file that's already in Documents reuses that document instead of adding a copy.
+- An **account** has a name (required) and an optional identifier, usually the bank account
+  number. Nothing else in Statements is available until the organisation has one; people with
+  `write-statements` create, edit and delete accounts (Statements → Accounts, or "New account…"
+  in the picker). Names and identifiers are unique within the organisation. Deleting an account
+  shows a preview first and deletes its saved statements, rows and type rules; documents stay.
+- The page header names the **account you're working in**; the picker at the top right switches
+  (remembered per browser).
+- **Transactions**: every row saved in the account, in a grid you can search, filter (month and
+  type from their column headers), sort (shift-click for more than one column) and page
+  through, with a status bar (count, sum/average/min/max of Amount, paging, Compact and Wide).
+  `month` ("Aug 2024") is worked out from the date, exactly as the Google Sheet's is. Click a row
+  for its details, type and attached documents.
+- **Uploads**: drop a bank statement CSV (only Standard Bank CSV so far) to save it into the
+  account. When the file states an account number, the preview says whether it **matches** the
+  account's identifier. A mismatch doesn't stop the save, but the button becomes "Save to …
+  anyway", and if another account has that identifier it offers to switch.
+- Each row's id is the n8n hash of its date, description and amount, the same id the Google
+  Sheets use. A row is stored once per account, so saving a statement again (or one that
+  overlaps) updates rows instead of duplicating them.
+- **Types** are a list per organisation, shared by every account: add, rename (renames it on
+  every row and rule) or delete one nobody uses. People with `write-statements` can pick a
+  row's type in the grid or in the upload preview; a picked type is *hand-set* and saving a
+  statement never changes it. Clearing it lets the next save type the row from the rules.
+- **Type rules** belong to an account (Statements → Type rules, for the selected account) and
+  set each row's `type` when a statement is saved into it. They're tried in order and the
+  first match wins; a row no rule matches keeps the type it already had.
+- **Documents on rows**: attach any existing document from Documents to a row (`write-statements`
+  and `read-docs`), or remove the link; the document itself is never changed.
+- The original file is always kept in Documents, in `Statements/<account name>`, saved on the
+  uploader's behalf and **private** (only members with `read-docs` can open it). Saving a file
+  that's already in Documents reuses that document instead of adding a copy.
 - Deleting a saved statement (after a preview of what goes) deletes its rows that no other
   saved statement contains, with their attached-document links. Its file and attached
   documents stay in Documents.

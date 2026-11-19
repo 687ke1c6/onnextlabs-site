@@ -9,7 +9,6 @@ import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/component
 import { Menu, menuItemClass, useMenu } from "~/components/ui/menu";
 import { can } from "~/lib/orgs";
 import {
-  accountLabel,
   amountValue,
   fetchOrgTransactions,
   fetchTypes,
@@ -20,10 +19,10 @@ import {
   setRowType,
 } from "~/lib/statements";
 import { cn, selectValue, settled } from "~/lib/utils";
-import { Allowed, PageHeader } from "~/routes/portal/Layout";
+import { Allowed } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 import { RowPanel } from "~/routes/portal/org/RowPanel";
-import { AccountPicker, StatementsTabs, useStatementAccount } from "~/routes/portal/org/StatementParts";
+import { type AccountState, StatementsShell } from "~/routes/portal/org/StatementsShell";
 
 type Meta = GridColumnMeta<OrgTransaction>;
 
@@ -302,20 +301,20 @@ function NoTransactions() {
   );
 }
 
-function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> }) {
+function TransactionsView(props: { acct: AccountState }) {
   const org = useOrg();
   // Each result carries its account, so rows from the previous account never show under the new one.
   const [rows, { mutate }] = createResource(
     () => {
       const a = props.acct.account();
-      return a ? { account: a.number } : undefined;
+      return a ? { account: a.id } : undefined;
     },
     async ({ account }) => ({ account, rows: await fetchOrgTransactions(org.slug, account) }),
   );
   const current = () => {
     const data = settled(rows);
     const a = props.acct.account();
-    return data && a && data.account === a.number ? data : undefined;
+    return data && a && data.account === a.id ? data : undefined;
   };
   const error = () => rows.error ?? props.acct.accounts.error;
   // Rebuilt only when the account changes, so editing a row keeps filters, sorting and page.
@@ -349,9 +348,6 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
     <div class="mt-6 flex min-h-0 flex-1 flex-col">
       <Show when={error()}>
         {(e) => <p class="text-sm text-red-500">{e() instanceof Error ? (e() as Error).message : "Couldn't load transactions."}</p>}
-      </Show>
-      <Show when={props.acct.account() === null}>
-        <NoTransactions />
       </Show>
       <Show when={props.acct.account() && !current() && !error()}>
         <div class="h-64 animate-pulse rounded-xl bg-secondary/40" />
@@ -403,19 +399,9 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
 }
 
 function Transactions() {
-  const org = useOrg();
-  const acct = useStatementAccount();
-  const description = () => {
-    const a = acct.account();
-    return a ? `Every transaction saved for account ${accountLabel(a.number)}.` : `Transactions saved for ${org.name}.`;
-  };
   return (
-    // Hands its leftover height down to the grid (see `pageHasGrid`).
-    <div class="flex min-h-0 flex-1 flex-col">
-      <PageHeader title="Statements" description={description()} actions={<AccountPicker state={acct} />} />
-      <StatementsTabs />
-      <TransactionsView acct={acct} />
-    </div>
+    // Fills the window's height, so only the grid's rows scroll (see `pageHasGrid`).
+    <StatementsShell fill>{(acct) => <TransactionsView acct={acct} />}</StatementsShell>
   );
 }
 

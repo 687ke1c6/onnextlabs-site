@@ -1,8 +1,11 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Match, on, Show, Switch } from "solid-js";
 import { Link, useNavigate } from "@tanstack/solid-router";
+import CircleCheck from "lucide-solid/icons/circle-check";
 import FileSpreadsheet from "lucide-solid/icons/file-spreadsheet";
 import FolderOpen from "lucide-solid/icons/folder-open";
+import Info from "lucide-solid/icons/info";
 import Loader2 from "lucide-solid/icons/loader-circle";
+import TriangleAlert from "lucide-solid/icons/triangle-exclamation-point";
 import UploadCloud from "lucide-solid/icons/cloud-upload";
 import X from "lucide-solid/icons/x";
 import type { ColumnDef } from "@tanstack/solid-table";
@@ -14,26 +17,87 @@ import {
   formatDate,
   formatPeriod,
   fetchTypes,
+  type Account,
   type Preview,
   previewStatement,
   saveStatement,
   type UploadSummary,
 } from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
-import { Allowed, PageHeader } from "~/routes/portal/Layout";
+import { Allowed } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
-import {
-  AccountPicker,
-  Fact,
-  StatementsTabs,
-  TransactionsTable,
-  useStatementAccount,
-} from "~/routes/portal/org/StatementParts";
+import { Fact, TransactionsTable } from "~/routes/portal/org/StatementParts";
+import { type AccountState, StatementsShell } from "~/routes/portal/org/StatementsShell";
 
 const errorText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
 /** Drop a statement, see what it holds, then save it (optionally with a copy in Documents). */
-function UploadPanel(props: { onSaved: (account: string) => void }) {
+/**
+ * How the account number the statement states compares with the account it's going into.
+ * A mismatch doesn't stop the save; it's there to catch the wrong account being selected.
+ */
+function AccountCheckBanner(props: { preview: Preview; onSwitch: (id: number) => void }) {
+  const p = () => props.preview;
+  const stated = () => p().account_number ?? "";
+  return (
+    <Switch>
+      <Match when={p().account_check === "match"}>
+        <p class="mt-4 flex items-start gap-2 rounded-lg bg-emerald-500/10 p-3 text-sm">
+          <CircleCheck size={16} class="mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+          <span>
+            The statement is for account <span class="font-mono">{stated()}</span>, which matches{" "}
+            <span class="font-medium">{p().account.name}</span>.
+          </span>
+        </p>
+      </Match>
+      <Match when={p().account_check === "mismatch"}>
+        <div class="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+          <TriangleAlert size={16} class="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <div class="flex-1">
+            <p>
+              The statement is for account <span class="font-mono font-medium">{stated()}</span>, but{" "}
+              <span class="font-medium">{p().account.name}</span>'s identifier is{" "}
+              <span class="font-mono font-medium">{p().account.identifier}</span>.
+            </p>
+            <Show
+              when={p().suggested_account}
+              fallback={<p class="mt-1 text-muted-foreground">You can still save it here; check it's the right account first.</p>}
+            >
+              {(other) => (
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <span class="text-muted-foreground">
+                    <span class="font-medium text-foreground">{other().name}</span> has that identifier.
+                  </span>
+                  <Button size="sm" variant="outline" class="h-7" onClick={() => props.onSwitch(other().id)}>
+                    Switch to {other().name}
+                  </Button>
+                </div>
+              )}
+            </Show>
+          </div>
+        </div>
+      </Match>
+      <Match when={p().account_check === "no_identifier"}>
+        <p class="mt-4 flex items-start gap-2 rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">
+          <Info size={16} class="mt-0.5 shrink-0" />
+          <span>
+            The statement is for account <span class="font-mono text-foreground">{stated()}</span>.{" "}
+            <span class="font-medium text-foreground">{p().account.name}</span> has no identifier, so it can't be checked. Add one under
+            Accounts to have statements checked.
+          </span>
+        </p>
+      </Match>
+      <Match when={p().account_check === "not_stated"}>
+        <p class="mt-4 flex items-start gap-2 rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">
+          <Info size={16} class="mt-0.5 shrink-0" />
+          <span>This statement doesn't state an account number, so it can't be checked against the account.</span>
+        </p>
+      </Match>
+    </Switch>
+  );
+}
+
+function UploadPanel(props: { account: () => Account; onSaved: (accountId: number) => void; onSwitch: (id: number) => void }) {
   const org = useOrg();
   const navigate = useNavigate();
   let fileInput!: HTMLInputElement;
@@ -65,15 +129,13 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
     if (fileInput) fileInput.value = "";
   };
 
-  const pick = async (files: FileList | null | undefined) => {
-    const f = files?.[0];
-    if (!f) return;
+  const read = async (f: File) => {
     setError(null);
     setPreview(null);
     setFile(f);
     setBusy("reading");
     try {
-      const p = await previewStatement(org.slug, f);
+      const p = await previewStatement(org.slug, f, props.account().id);
       setPicks({});
       setPreview(p);
     } catch (e) {
@@ -83,6 +145,22 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
       setBusy(null);
     }
   };
+  const pick = async (files: FileList | null | undefined) => {
+    const f = files?.[0];
+    if (f) await read(f);
+  };
+  // A different account picked (in the header, or "Switch to…") with a statement open: preview
+  // it again for that account (its rules, stored rows and identifier check).
+  createEffect(
+    on(
+      () => props.account().id,
+      () => {
+        const f = file();
+        if (f && preview()) void read(f);
+      },
+      { defer: true },
+    ),
+  );
 
   const save = async () => {
     const f = file();
@@ -90,9 +168,8 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
     setError(null);
     setBusy("saving");
     try {
-      const saved = await saveStatement(org.slug, f, picks());
-      // The Statements pages now show the account this statement belongs to.
-      props.onSaved(saved.account_number);
+      const saved = await saveStatement(org.slug, f, props.account().id, picks());
+      props.onSaved(saved.account_id);
       void navigate({ to: "/portal/$org/statements/$upload", params: { org: org.slug, upload: String(saved.id) } });
     } catch (e) {
       setError(errorText(e, "Couldn't save the statement."));
@@ -180,10 +257,11 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
 
             <dl class="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
               <Fact label="Format" value={p().format_name} />
-              <Fact label="Account" value={p().account_number ?? "Not stated"} />
+              <Fact label="Account in the file" value={p().account_number ?? "Not stated"} />
               <Fact label="Period" value={formatPeriod(p().first_date, p().last_date)} />
               <Fact label="Rows" value={`${p().rows} (${shownRows().filter((t) => t.type).length} typed)`} />
             </dl>
+            <AccountCheckBanner preview={p()} onSwitch={props.onSwitch} />
             <p class="mt-3 text-sm text-muted-foreground">
               {p().new} new {p().new === 1 ? "row" : "rows"}
               <Show when={p().existing > 0}>
@@ -238,7 +316,7 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
                 <Show when={busy() === "saving"}>
                   <Loader2 size={16} class="animate-spin" />
                 </Show>
-                Save statement
+                {p().account_check === "mismatch" ? `Save to ${p().account.name} anyway` : `Save to ${p().account.name}`}
               </Button>
             </div>
           </div>
@@ -320,20 +398,20 @@ const uploadColumns: ColumnDef<UploadSummary, any>[] = [
   },
 ];
 
-function UploadsList(props: { acct: ReturnType<typeof useStatementAccount> }) {
+function UploadsList(props: { acct: AccountState }) {
   const org = useOrg();
   // Each result carries its account, so one account's statements never show under another.
   const [uploads] = createResource(
     () => {
       const a = props.acct.account();
-      return a ? { account: a.number } : undefined;
+      return a ? { account: a.id } : undefined;
     },
     async ({ account }) => ({ account, list: await fetchUploads(org.slug, account) }),
   );
   const current = () => {
     const data = settled(uploads);
     const a = props.acct.account();
-    return data && a && data.account === a.number ? data : undefined;
+    return data && a && data.account === a.id ? data : undefined;
   };
   const error = () => uploads.error ?? props.acct.accounts.error;
 
@@ -343,7 +421,7 @@ function UploadsList(props: { acct: ReturnType<typeof useStatementAccount> }) {
       <Show when={error()}>
         <p class="text-sm text-red-500">{errorText(error(), "Couldn't load statements.")}</p>
       </Show>
-      <Show when={props.acct.account() === null || current()?.list.length === 0}>
+      <Show when={current()?.list.length === 0}>
         <p class="rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
           No statements saved yet.
         </p>
@@ -370,21 +448,25 @@ function UploadsList(props: { acct: ReturnType<typeof useStatementAccount> }) {
 
 function Uploads() {
   const org = useOrg();
-  const acct = useStatementAccount();
   return (
-    // Hands its leftover height down to the grid (see `pageHasGrid`).
-    <div class="flex min-h-0 flex-1 flex-col">
-      <PageHeader
-        title="Statements"
-        description="Statement files saved for this account. Open one to see its rows or send them to your own Google Sheet."
-        actions={<AccountPicker state={acct} />}
-      />
-      <StatementsTabs />
-      <Show when={can(org, "write-statements")}>
-        <UploadPanel onSaved={(account) => acct.pick(account)} />
-      </Show>
-      <UploadsList acct={acct} />
-    </div>
+    // Fills the window's height, so only the grid's rows scroll (see `pageHasGrid`).
+    <StatementsShell fill>
+      {(acct, account) => (
+        <>
+          <Show when={can(org, "write-statements")}>
+            <UploadPanel
+              account={account}
+              onSwitch={(id) => acct.pick(id)}
+              onSaved={(id) => {
+                acct.pick(id);
+                acct.reload(); // its row and statement counts changed
+              }}
+            />
+          </Show>
+          <UploadsList acct={acct} />
+        </>
+      )}
+    </StatementsShell>
   );
 }
 

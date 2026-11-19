@@ -335,3 +335,24 @@ points at. Read-only; the delete itself is a plain `DELETE` the foreign keys car
 - A shared `DeleteDialog` shows the preview (deleted / kept with link removed / blocking) before
   any delete.
 
+# Part 3: accounts as a first-class thing
+
+| Topic | Decision |
+|---|---|
+| Account | `statement_accounts`: name (required, unique in the org ignoring case), identifier (optional, unique in the org when set; usually the bank account number). |
+| Required | Nothing in Statements works until the org has an account; the pages show "Create your first account" instead. |
+| Uploads | Saved *into* an account (the one selected). The stated account number is kept on the upload (`account_number`). |
+| Account check | The preview compares the stated number with the account's identifier: match / mismatch / no identifier / not stated. A mismatch never blocks; Save becomes "Save to … anyway", and another account with that identifier is offered as a switch. |
+| Rows | Unique per account: `UNIQUE (account_id, txn_id)`. The n8n id itself is unchanged. |
+| Type rules | Belong to an account (`/api/orgs/{slug}/statement-accounts/{id}/rules`); the per-format option is gone. Every account starts with none (existing org-wide rules were dropped: nothing in production). |
+| Types | Still one list per org, shared by every account's rules. |
+| Managing | An Accounts tab (create, edit, delete with the foreign-key preview and the name typed), and "New account…" in the header picker. `write-statements`. |
+| Documents folder | `Statements/<account name>`. |
+
+Migration 0013 runs **outside a transaction** (`-- no-transaction`) with foreign keys off for the
+table rebuilds (SQLite's documented procedure): rebuilding `statement_transactions` inside a
+transaction would cascade-delete its links. It creates an account for every account number in use
+(named and identified by it), moves uploads and rows onto it, and recreates the rules table empty.
+Checked on a copy of the dev database: all rows, links and attachment links kept, `foreign_key_check`
+and `integrity_check` clean.
+

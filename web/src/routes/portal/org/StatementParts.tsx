@@ -1,14 +1,13 @@
-import { createMemo, createResource, For, Show } from "solid-js";
+import { For, Show } from "solid-js";
 import { Link } from "@tanstack/solid-router";
 import Hand from "lucide-solid/icons/hand";
-import { pickAccount, pickedAccount } from "~/lib/statementAccount";
-import { accountLabel, fetchAccounts, formatAmount, formatDate, isNegative, type Transaction } from "~/lib/statements";
-import { cn, selectValue, settled } from "~/lib/utils";
+import { formatAmount, formatDate, isNegative, type Transaction } from "~/lib/statements";
+import { cn, selectValue } from "~/lib/utils";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 
 const TAB = "rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-/** Transactions | Uploads | Type rules, under the page header. */
+/** Transactions | Uploads | Type rules | Accounts, under the page header. */
 export function StatementsTabs() {
   const org = useOrg();
   return (
@@ -40,6 +39,15 @@ export function StatementsTabs() {
         inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
       >
         Type rules
+      </Link>
+      <Link
+        to="/portal/$org/statements/accounts"
+        params={{ org: org.slug }}
+        class={TAB}
+        activeProps={{ class: "bg-secondary text-foreground" }}
+        inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
+      >
+        Accounts
       </Link>
     </nav>
   );
@@ -135,55 +143,3 @@ export function Fact(props: { label: string; value: string | number }) {
     </div>
   );
 }
-
-/**
- * The account the Statements pages show: the one last picked for this org if it still has
- * statements, otherwise the most recently uploaded. `account()` is undefined while loading and
- * null when the org has no statements yet.
- */
-export function useStatementAccount() {
-  const org = useOrg();
-  const [accounts] = createResource(() => org.slug, fetchAccounts);
-  const account = createMemo(() => {
-    const list = settled(accounts);
-    if (!list) return undefined;
-    const want = pickedAccount(org.slug);
-    const found = list.find((a) => a.account_number === want) ?? list[0];
-    // Wrapped: "" (no account stated) is a real account, but falsy.
-    return found ? { number: found.account_number } : null;
-  });
-  return {
-    accounts,
-    account,
-    pick: (number: string) => pickAccount(org.slug, number),
-  };
-}
-
-/** "Account [123456789 ▾]" for the page header. */
-export function AccountPicker(props: { state: ReturnType<typeof useStatementAccount> }) {
-  const list = () => settled(props.state.accounts) ?? [];
-  return (
-    <Show when={props.state.account()}>
-      {(current) => (
-        <label class="flex items-center gap-2 text-sm">
-          <span class="text-muted-foreground">Account</span>
-          <select
-            value={current().number}
-            onChange={(e) => props.state.pick(e.currentTarget.value)}
-            class="h-9 min-w-[10rem] rounded-md border border-input bg-background px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="Account"
-          >
-            <For each={list()}>
-              {(a) => (
-                <option value={a.account_number}>
-                  {accountLabel(a.account_number)} ({a.rows} {a.rows === 1 ? "row" : "rows"})
-                </option>
-              )}
-            </For>
-          </select>
-        </label>
-      )}
-    </Show>
-  );
-}
-
