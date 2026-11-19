@@ -1,13 +1,13 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import { Link, useNavigate } from "@tanstack/solid-router";
 import FileSpreadsheet from "lucide-solid/icons/file-spreadsheet";
+import FolderOpen from "lucide-solid/icons/folder-open";
 import Loader2 from "lucide-solid/icons/loader-circle";
 import UploadCloud from "lucide-solid/icons/cloud-upload";
 import X from "lucide-solid/icons/x";
 import type { ColumnDef } from "@tanstack/solid-table";
 import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Button } from "~/components/ui/button";
-import { fetchAllFolders } from "~/lib/documents";
 import { can } from "~/lib/orgs";
 import {
   fetchUploads,
@@ -42,16 +42,11 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
   const [busy, setBusy] = createSignal<"reading" | "saving" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [dragging, setDragging] = createSignal(false);
-  const canSaveDocs = () => can(org, "write-docs");
-  const [toDocuments, setToDocuments] = createSignal(false);
-  const [folder, setFolder] = createSignal("");
-  const [folders] = createResource(() => (toDocuments() ? org.slug : undefined), fetchAllFolders);
 
   const reset = () => {
     setFile(null);
     setPreview(null);
     setError(null);
-    setToDocuments(false);
     if (fileInput) fileInput.value = "";
   };
 
@@ -65,7 +60,6 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
     try {
       const p = await previewStatement(org.slug, f);
       setPreview(p);
-      setFolder(p.documents_folder);
     } catch (e) {
       setError(errorText(e, "Couldn't read that statement."));
       setFile(null);
@@ -80,7 +74,7 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
     setError(null);
     setBusy("saving");
     try {
-      const saved = await saveStatement(org.slug, f, toDocuments(), folder());
+      const saved = await saveStatement(org.slug, f);
       // The Statements pages now show the account this statement belongs to.
       props.onSaved(saved.account_number);
       void navigate({ to: "/portal/$org/statements/$upload", params: { org: org.slug, upload: String(saved.id) } });
@@ -89,13 +83,6 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
     } finally {
       setBusy(null);
     }
-  };
-
-  // The default folder is offered even before it exists: saving creates it.
-  const folderOptions = () => {
-    const list = settled(folders) ?? [];
-    const def = preview()?.documents_folder;
-    return def && !list.includes(def) ? [def, ...list] : list;
   };
 
   return (
@@ -194,35 +181,30 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
               <TransactionsTable rows={p().transactions} showStored />
             </div>
 
-            <Show when={canSaveDocs()}>
-              <div class="mt-5 flex flex-col gap-3 rounded-lg bg-secondary/20 p-4">
-                <label class="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={toDocuments()}
-                    onChange={(e) => setToDocuments(e.currentTarget.checked)}
-                    disabled={!!busy()}
-                    class="h-4 w-4 rounded border-input"
-                  />
-                  Also save the file to Documents
-                </label>
-                <Show when={toDocuments()}>
-                  <div class="flex flex-col gap-1.5 pl-6">
-                    <label for="statement-folder" class="text-xs text-muted-foreground">Folder</label>
-                    <select
-                      id="statement-folder"
-                      value={(settled(folders), folder())}
-                      onChange={(e) => setFolder(e.currentTarget.value)}
-                      disabled={!!busy() || folders.loading}
-                      class="h-9 max-w-sm rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <option value="">Documents (top level)</option>
-                      <For each={folderOptions()}>{(path) => <option value={path}>Documents / {path.split("/").join(" / ")}</option>}</For>
-                    </select>
-                  </div>
-                </Show>
-              </div>
-            </Show>
+            {/* The file is always kept in Documents (privately), so every row can be traced back to it. */}
+            <p class="mt-5 flex items-start gap-2 rounded-lg bg-secondary/20 p-3 text-sm text-muted-foreground">
+              <FolderOpen size={16} class="mt-0.5 shrink-0" />
+              <Show
+                when={p().existing_document}
+                fallback={
+                  <span>
+                    A copy of the file is saved to{" "}
+                    <span class="font-medium text-foreground">Documents / {p().documents_folder.split("/").join(" / ")}</span>, visible to
+                    members who can read documents.
+                  </span>
+                }
+              >
+                {(doc) => (
+                  <span>
+                    This file is already in Documents (
+                    <span class="font-medium text-foreground">
+                      {[...(doc().folder ? doc().folder.split("/") : []), doc().filename].join(" / ")}
+                    </span>
+                    ), so the statement will point to it rather than saving another copy.
+                  </span>
+                )}
+              </Show>
+            </p>
 
             <div class="mt-5 flex flex-wrap items-center justify-end gap-2">
               <Button variant="ghost" onClick={reset} disabled={!!busy()}>

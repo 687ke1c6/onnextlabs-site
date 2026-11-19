@@ -318,6 +318,7 @@ async fn upload(
                     &filename,
                     content_type,
                     &uploaded,
+                    true,
                 )
                 .await;
                 if stored.is_err() {
@@ -334,8 +335,10 @@ async fn upload(
 }
 
 /// Saves a file already in memory as a document in `folder` (created if new), numbering the
-/// name if it's taken, exactly like an upload. The caller checks `write-docs`. Returns the
-/// document's id and its final name.
+/// name if it's taken, exactly like an upload. The caller checks permissions. `public: false`
+/// means only members with `read-docs` can download it. Returns the document's id, folder and
+/// final name.
+#[allow(clippy::too_many_arguments)]
 pub async fn save_bytes(
     state: &AppState,
     org: &Org,
@@ -344,6 +347,7 @@ pub async fn save_bytes(
     filename: &str,
     content_type: Option<String>,
     bytes: axum::body::Bytes,
+    public: bool,
 ) -> Result<(i64, String, String), Response> {
     let folder = parse_folder(folder).map_err(bad_request)?;
     let filename = upload_name(filename).map_err(bad_request)?;
@@ -369,13 +373,14 @@ pub async fn save_bytes(
         &filename,
         content_type,
         &uploaded,
+        public,
     )
     .await;
     if stored.is_err() {
         let _ = state.storage.delete(&uploaded.temp).await;
     }
     let doc = stored?;
-    tracing::info!(id = doc.id, org = %org.slug, folder = %doc.folder, filename = %doc.filename, size = doc.size, user = user_id, "document saved");
+    tracing::info!(id = doc.id, org = %org.slug, folder = %doc.folder, filename = %doc.filename, size = doc.size, public, user = user_id, "document saved");
     Ok((doc.id, doc.folder, doc.filename))
 }
 
@@ -392,6 +397,7 @@ async fn store(
     filename: &str,
     content_type: Option<String>,
     uploaded: &crate::storage::Uploaded,
+    public: bool,
 ) -> Result<Document, Response> {
     for n in 0..100 {
         let name = numbered(filename, n);
@@ -399,8 +405,8 @@ async fn store(
             .join(&name)
             .map_err(|_| bad_request("Invalid file name."))?;
         let inserted = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO documents (org_id, folder, filename, size, content_type, sha256, uploaded_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO documents (org_id, folder, filename, size, content_type, sha256, uploaded_by, public)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(org.id)
         .bind(folder)
@@ -409,6 +415,7 @@ async fn store(
         .bind(&content_type)
         .bind(&uploaded.sha256)
         .bind(user_id)
+        .bind(public)
         .fetch_one(&state.db)
         .await;
         let id = match inserted {

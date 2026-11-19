@@ -44,8 +44,56 @@ use crate::{
     AppState,
 };
 
-/// Where "Save to Documents" puts statements unless the uploader picks another folder.
-pub const DEFAULT_DOCUMENTS_FOLDER: &str = "Statements";
+/// Every saved statement is kept in Documents under `Statements/<account number>`.
+const STATEMENTS_FOLDER: &str = "Statements";
+
+/// `Statements/<account>` (or `Statements/No account`). Account numbers are digits in practice;
+/// anything that isn't safe as a folder name is replaced.
+fn statement_folder(account: &str) -> String {
+    let name: String = account
+        .trim()
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c.is_control() {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let name = name.trim_start_matches('.').trim();
+    if name.is_empty() {
+        format!("{STATEMENTS_FOLDER}/No account")
+    } else {
+        format!(
+            "{STATEMENTS_FOLDER}/{}",
+            name.chars().take(100).collect::<String>()
+        )
+    }
+}
+
+/// The org's document with exactly this content, if there is one (the oldest).
+async fn document_with_sha256(
+    db: &SqlitePool,
+    org_id: i64,
+    sha256: &str,
+) -> Result<Option<ExistingDocument>, Response> {
+    sqlx::query_as(
+        "SELECT id, folder, filename FROM documents WHERE org_id = ? AND sha256 = ? ORDER BY id LIMIT 1",
+    )
+    .bind(org_id)
+    .bind(sha256)
+    .fetch_optional(db)
+    .await
+    .map_err(db_error)
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct ExistingDocument {
+    id: i64,
+    folder: String,
+    filename: String,
+}
 /// Room for multipart boundaries and the small fields on top of the file itself.
 const MULTIPART_OVERHEAD: usize = 64 * 1024;
 const MAX_RULES: usize = 500;
@@ -85,30 +133,16 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
 struct UploadForm {
     filename: String,
     bytes: Bytes,
-    save_to_documents: bool,
-    folder: Option<String>,
 }
 
-/// Multipart fields: `file` (required), `save_to_documents` ("true"), `folder`.
+/// Multipart field `file` (required).
 async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadForm, Response> {
     let mut file = None;
-    let mut save_to_documents = false;
-    let mut folder = None;
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
-        match field.name() {
-            Some("file") => {
-                let name = display_name(field.file_name().unwrap_or_default());
-                let bytes = field.bytes().await.map_err(multipart_error)?;
-                file = Some((name, bytes));
-            }
-            Some("save_to_documents") => {
-                save_to_documents = field.text().await.map_err(multipart_error)? == "true";
-            }
-            Some("folder") => {
-                let text = field.text().await.map_err(multipart_error)?;
-                folder = Some(text).filter(|f| !f.trim().is_empty());
-            }
-            _ => {}
+        if field.name() == Some("file") {
+            let name = display_name(field.file_name().unwrap_or_default());
+            let bytes = field.bytes().await.map_err(multipart_error)?;
+            file = Some((name, bytes));
         }
     }
     let (filename, bytes) = file.ok_or_else(|| bad_request("No file was sent."))?;
@@ -124,12 +158,7 @@ async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadFor
             "Only CSV statements are supported for now.",
         ));
     }
-    Ok(UploadForm {
-        filename,
-        bytes,
-        save_to_documents,
-        folder,
-    })
+    Ok(UploadForm { filename, bytes })
 }
 
 /// Detects the format, parses, assigns the n8n ids and applies the type rules.
@@ -184,8 +213,10 @@ struct Preview {
     new: usize,
     existing: usize,
     transactions: Vec<PreviewRow>,
-    /// The default "Save to Documents" folder.
-    documents_folder: &'static str,
+    /// Where the copy of the file goes in Documents...
+    documents_folder: String,
+    /// ...unless this exact file is already there, in which case that one is used.
+    existing_document: Option<ExistingDocument>,
 }
 
 #[derive(Serialize)]
@@ -216,6 +247,8 @@ async fn preview(
 
     let txs = &st.transactions;
     let existing = txs.iter().filter(|t| stored.contains(&t.id)).count();
+    let sha256 = hex::encode(Sha256::digest(&form.bytes));
+    let existing_document = document_with_sha256(&state.db, org.id, &sha256).await?;
     Ok(Json(Preview {
         filename: form.filename,
         format: st.format.id(),
@@ -239,7 +272,8 @@ async fn preview(
                 stored: stored.contains(&t.id),
             })
             .collect(),
-        documents_folder: DEFAULT_DOCUMENTS_FOLDER,
+        documents_folder: statement_folder(&account_of(&st)),
+        existing_document,
     }))
 }
 
@@ -261,40 +295,39 @@ async fn stored_ids(db: &SqlitePool, org_id: i64, account: &str) -> Result<HashS
 
 // ---- save ----
 
-/// POST /api/orgs/{org}/statements — parse again and save: the upload, every row (new rows
-/// inserted, stored rows updated), and optionally a copy of the file in Documents.
+/// POST /api/orgs/{org}/statements — parse again and save: the file in Documents (on the
+/// uploader's behalf, private; an identical file already there is reused), then the upload and
+/// every row (new rows inserted, stored rows updated).
 async fn save(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
     UrlPath(slug): UrlPath<String>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<UploadDetail>), Response> {
-    let (org, perms) = rbac::org_access(&state.db, &user, &slug).await?;
-    perms.require(Permission::WriteStatements)?;
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     let form = read_form(multipart, state.max_upload_bytes).await?;
-    if form.save_to_documents {
-        perms.require(Permission::WriteDocs)?;
-    }
     let rules = org_rules(&state.db, org.id).await?;
     let st = parse_statement(&form.bytes, &rules)?;
     let sha256 = hex::encode(Sha256::digest(&form.bytes));
 
     // The file first: storage is the likelier failure, and nothing is in the database yet.
-    let document_id = if form.save_to_documents {
-        let folder = form.folder.as_deref().unwrap_or(DEFAULT_DOCUMENTS_FOLDER);
-        let (id, _, _) = documents::save_bytes(
-            &state,
-            &org,
-            user.id,
-            folder,
-            &form.filename,
-            Some("text/csv".into()),
-            form.bytes.clone(),
-        )
-        .await?;
-        Some(id)
-    } else {
-        None
+    // Saved on the uploader's behalf (no `write-docs` needed) and private.
+    let document_id = match document_with_sha256(&state.db, org.id, &sha256).await? {
+        Some(doc) => doc.id,
+        None => {
+            documents::save_bytes(
+                &state,
+                &org,
+                user.id,
+                &statement_folder(&account_of(&st)),
+                &form.filename,
+                Some("text/csv".into()),
+                form.bytes.clone(),
+                false,
+            )
+            .await?
+            .0
+        }
     };
 
     let upload_id = store(
@@ -304,7 +337,7 @@ async fn save(
         &form.filename,
         &sha256,
         &st,
-        document_id,
+        Some(document_id),
     )
     .await
     .map_err(db_error)?;
@@ -989,6 +1022,15 @@ fn multipart_error(e: MultipartError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statement_folders_are_safe_and_per_account() {
+        assert_eq!(statement_folder("123456789"), "Statements/123456789");
+        assert_eq!(statement_folder(""), "Statements/No account");
+        assert_eq!(statement_folder("  "), "Statements/No account");
+        assert_eq!(statement_folder("12/34"), "Statements/12-34");
+        assert_eq!(statement_folder("..x"), "Statements/x");
+    }
 
     #[test]
     fn display_names_drop_paths_and_control_characters() {

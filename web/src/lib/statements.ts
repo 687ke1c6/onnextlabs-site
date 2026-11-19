@@ -27,7 +27,10 @@ export type Preview = {
   new: number;
   existing: number;
   transactions: PreviewRow[];
+  /** Where the copy of the file is saved in Documents... */
   documents_folder: string;
+  /** ...unless this exact file is already there, in which case that document is used. */
+  existing_document: { id: number; folder: string; filename: string } | null;
 };
 
 export type UploadSummary = {
@@ -62,12 +65,8 @@ export type FormatInfo = { id: string; name: string };
 
 const base = (org: string) => `/api/orgs/${encodeURIComponent(org)}`;
 
-function form(file: File, options?: { saveToDocuments: boolean; folder: string }) {
+function form(file: File) {
   const body = new FormData();
-  if (options) {
-    body.append("save_to_documents", options.saveToDocuments ? "true" : "false");
-    body.append("folder", options.folder);
-  }
   body.append("file", file);
   return body;
 }
@@ -79,10 +78,10 @@ export const previewStatement = async (org: string, file: File) =>
     "Couldn't read that statement.",
   );
 
-/** Parses and saves it (and optionally a copy in Documents). */
-export const saveStatement = async (org: string, file: File, saveToDocuments: boolean, folder: string) =>
+/** Parses and saves it; the file itself is kept in Documents (Statements/<account>). */
+export const saveStatement = async (org: string, file: File) =>
   json<UploadDetail>(
-    await fetch(`${base(org)}/statements`, { method: "POST", body: form(file, { saveToDocuments, folder }) }),
+    await fetch(`${base(org)}/statements`, { method: "POST", body: form(file) }),
     "Couldn't save the statement.",
   );
 

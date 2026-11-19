@@ -146,10 +146,11 @@ Bank CSV so far), checks the preview, and saves it. Saving stores every row in t
   per organisation and tried in order, and the first match wins. A row no rule matches keeps
   the type it already had, so re-saving a statement re-applies changed rules without wiping
   types.
-- "Also save the file to Documents" (needs `write-docs`) puts a copy of the original file in
-  Documents, in a `Statements` folder by default.
-- Deleting a saved statement deletes the rows no other saved statement contains. A copy in
-  Documents stays.
+- The original file is always kept in Documents, in `Statements/<account number>`, saved on
+  the uploader's behalf and **private** (only members with `read-docs` can open it). Saving a
+  file that's already in Documents reuses that document instead of adding a copy.
+- Deleting a saved statement deletes the rows no other saved statement contains. Its file
+  stays in Documents.
 
 From a saved statement, anyone with `read-statements` can **send it to their own Google
 Sheet**. "Connect Google Sheets" asks Google for access to their spreadsheets (separately
