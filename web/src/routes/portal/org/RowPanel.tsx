@@ -22,7 +22,7 @@ import {
   isNegative,
   type RowDetail,
 } from "~/lib/statements";
-import { cn, settled } from "~/lib/utils";
+import { cn, selectValue, settled } from "~/lib/utils";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 
 const errorText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
@@ -157,7 +157,7 @@ export function RowPanel(props: {
                   <div class="mt-1 flex items-center gap-2">
                     <select
                       id="row-type"
-                      value={r().type ?? ""}
+                      value={selectValue(r().type ?? "", props.types)}
                       onChange={(e) => void changeType(e.currentTarget.value || null)}
                       disabled={!canEdit || busy()}
                       class="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"

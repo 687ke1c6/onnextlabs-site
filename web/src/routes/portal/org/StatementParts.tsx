@@ -3,7 +3,7 @@ import { Link } from "@tanstack/solid-router";
 import Hand from "lucide-solid/icons/hand";
 import { pickAccount, pickedAccount } from "~/lib/statementAccount";
 import { accountLabel, fetchAccounts, formatAmount, formatDate, isNegative, type Transaction } from "~/lib/statements";
-import { cn, settled } from "~/lib/utils";
+import { cn, selectValue, settled } from "~/lib/utils";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 
 const TAB = "rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -92,7 +92,7 @@ export function TransactionsTable(props: {
                       }
                     >
                       <select
-                        value={t.type ?? ""}
+                        value={selectValue(t.type ?? "", props.types)}
                         onChange={(e) => props.onType!(t, e.currentTarget.value || null)}
                         aria-label="Type"
                         class={cn(

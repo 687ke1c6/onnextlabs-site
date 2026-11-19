@@ -14,3 +14,13 @@ export function cn(...inputs: ClassValue[]) {
 export function settled<T>(resource: Resource<T>): T | undefined {
   return resource.state === "ready" || resource.state === "refreshing" ? resource.latest : undefined;
 }
+
+/**
+ * A `<select>`'s value, re-applied whenever its `options` change. A select given a value before
+ * the matching <option> exists (e.g. while the options load) shows its first option instead,
+ * and Solid doesn't set the value again when the options arrive. Reading `options` here makes
+ * it do so: `value={selectValue(row.type ?? "", types())}`.
+ */
+export function selectValue<T>(value: T, _options: unknown): T {
+  return value;
+}

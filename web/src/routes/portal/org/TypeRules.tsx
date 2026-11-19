@@ -20,7 +20,7 @@ import {
   testRules,
   type TypeInfo,
 } from "~/lib/statements";
-import { cn, settled } from "~/lib/utils";
+import { cn, selectValue, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 import { StatementsTabs } from "~/routes/portal/org/StatementParts";
@@ -101,7 +101,7 @@ function RuleCard(props: {
           <label for={id("type")} class="text-xs text-muted-foreground">Type</label>
           <select
             id={id("type")}
-            value={props.draft.type}
+            value={selectValue(props.draft.type, props.types)}
             onChange={(e) => set({ type: e.currentTarget.value })}
             disabled={!props.editable}
             class="h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
@@ -110,7 +110,7 @@ function RuleCard(props: {
               Choose a type
             </option>
             {/* A name that isn't on the list any more still shows, so it can be changed. */}
-            <Show when={props.draft.type && !props.types.includes(props.draft.type)}>
+            <Show when={props.draft.type && props.types.length > 0 && !props.types.includes(props.draft.type)}>
               <option value={props.draft.type}>{props.draft.type} (not on the list)</option>
             </Show>
             <For each={props.types}>{(t) => <option value={t}>{t}</option>}</For>

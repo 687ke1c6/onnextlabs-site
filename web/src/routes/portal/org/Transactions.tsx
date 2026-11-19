@@ -19,7 +19,7 @@ import {
   type OrgTransaction,
   setRowType,
 } from "~/lib/statements";
-import { cn, settled } from "~/lib/utils";
+import { cn, selectValue, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 import { RowPanel } from "~/routes/portal/org/RowPanel";
@@ -144,7 +144,7 @@ function TypeCell(props: { row: OrgTransaction }) {
     >
       <span class="inline-flex w-full items-center gap-1">
         <select
-          value={props.row.type ?? ""}
+          value={selectValue(props.row.type ?? "", edit!.types())}
           disabled={busy()}
           onClick={(e) => e.stopPropagation()}
           onChange={async (e) => {
