@@ -184,7 +184,7 @@ export function DataGrid<T>(props: {
     // Fills the space the page leaves it (see `pageHasGrid`); only the table area scrolls.
     <div class="flex min-h-[24rem] flex-1 flex-col gap-3">
       {/* Toolbar */}
-      <div class="flex flex-wrap items-end gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         {/* Search: a magnifying glass that slides open on hover or focus, and stays open while
             it holds text. */}
         <div
@@ -197,10 +197,10 @@ export function DataGrid<T>(props: {
           <Input
             ref={searchInput}
             class={cn(
-              "h-9 pl-9 pr-8",
-              // Closed: just the icon (no placeholder showing through).
+              "h-9 pl-9 pr-8 transition-[border-color,background-color] duration-200",
+              // Closed: just the icon. The border, background and placeholder fade in as it opens.
               !query() &&
-                "cursor-pointer placeholder:text-transparent group-focus-within:cursor-text group-focus-within:placeholder:text-muted-foreground group-hover:cursor-text group-hover:placeholder:text-muted-foreground",
+                "cursor-pointer border-transparent bg-transparent placeholder:text-transparent group-focus-within:cursor-text group-focus-within:border-input group-focus-within:bg-background/60 group-focus-within:placeholder:text-muted-foreground group-hover:cursor-text group-hover:border-input group-hover:bg-background/60 group-hover:placeholder:text-muted-foreground",
             )}
             value={query()}
             onInput={(e) => table.setGlobalFilter(e.currentTarget.value)}
@@ -228,31 +228,34 @@ export function DataGrid<T>(props: {
             </button>
           </Show>
         </div>
-        <Menu
-          label="Columns"
-          title="Show or hide columns"
-          trigger={
-            <>
-              <Columns3 size={16} /> Columns
-            </>
-          }
-          triggerClass="inline-flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          class="bottom-auto left-auto right-0 top-full mb-0 mt-1 w-48"
-        >
-          <For each={table.getAllLeafColumns().filter((c) => c.getCanHide())}>
-            {(col) => (
-              <label class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
-                <input type="checkbox" checked={col.getIsVisible()} onChange={col.getToggleVisibilityHandler()} class="h-4 w-4" />
-                {meta<T>(col.columnDef.meta).label ?? String(col.columnDef.header)}
-              </label>
-            )}
-          </For>
-        </Menu>
-        <Show when={anyFilter()}>
-          <Button variant="ghost" size="sm" onClick={clearAll}>
-            <X size={16} /> Clear
-          </Button>
-        </Show>
+        {/* Right-aligned, so nothing shifts as the search opens. */}
+        <div class="ml-auto flex items-center gap-2">
+          <Show when={anyFilter()}>
+            <Button variant="ghost" size="sm" onClick={clearAll}>
+              <X size={16} /> Clear
+            </Button>
+          </Show>
+          <Menu
+            label="Columns"
+            title="Show or hide columns"
+            trigger={
+              <>
+                <Columns3 size={16} /> Columns
+              </>
+            }
+            triggerClass="inline-flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="bottom-auto left-auto right-0 top-full mb-0 mt-1 w-48"
+          >
+            <For each={table.getAllLeafColumns().filter((c) => c.getCanHide())}>
+              {(col) => (
+                <label class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
+                  <input type="checkbox" checked={col.getIsVisible()} onChange={col.getToggleVisibilityHandler()} class="h-4 w-4" />
+                  {meta<T>(col.columnDef.meta).label ?? String(col.columnDef.header)}
+                </label>
+              )}
+            </For>
+          </Menu>
+        </div>
       </div>
 
       {/* Table */}
