@@ -17,7 +17,8 @@ reviewed and committed on its own.
 4. Optionally, from a saved upload: **Add to Google Sheet**. Connect Google (separate
    consent, Sheets scopes only), pick or create a spreadsheet and tab, and send **every
    row of that statement**, whether or not it was already in the database or the sheet. Rows
-   whose id is already in the tab are overwritten in place, and the rest are appended. The
+   whose id is already in the tab get their `type` overwritten in place (see step 4), and
+   the rest are appended. The
    header row is written to an empty tab, as in the POC.
 
 The database is the record. The Google Sheet is an optional copy for each person, going to
@@ -31,7 +32,7 @@ a sheet they own. Having a row in the database never stops it going to a sheet.
 | Categories | The built-in `categories.toml` (personal payee names) is **not** copied. Its matching logic stays in core, but the rules come from the database. |
 | Type rules | Per organisation, ordered, and the first match wins. Each rule has a `type`, a list of `contains` substrings (case-insensitive), an optional min amount (≥), an optional max amount (<), and optionally a set of formats. This is the POC's rule shape without `accounts`. Rules apply when a statement is saved. A "re-apply to stored transactions" action is a later option. |
 | Permissions | `read-statements` covers viewing uploads and transactions and adding them to your own Google Sheet. `write-statements` covers uploading, deleting uploads and editing type rules. Both go to `Admin-org` in a migration, and neither goes to `Member`. |
-| Google access | A separate "Connect Google Sheets" OAuth flow from the Statements page, asking for `spreadsheets` and `drive.metadata.readonly` only. It uses the same OAuth client and a new redirect URI, `<PUBLIC_URL>/api/statements/google/callback`. The access token is held in server memory, keyed by the portal session, for about an hour, with no refresh token. It never reaches the browser. A restart drops it and the user connects again. |
+| Google access | A separate "Connect Google Sheets" OAuth flow from the Statements page, asking for `spreadsheets` and `drive.metadata.readonly` only. It uses the same OAuth client and a new redirect URI, `<PUBLIC_URL>/api/statements/google/callback`. The access token is held in server memory, keyed by the portal user, for about an hour, with no refresh token. It never reaches the browser. A restart drops it and the user connects again. |
 | In-memory state | Apart from the Google token, there is none. Preview and save are both stateless multipart posts (the browser keeps the file between them), so nothing has to survive the Google redirect. That's why Sheets works from a *saved* upload. |
 | Blocking I/O | Core keeps blocking `ureq`, called through `spawn_blocking`. |
 | Raw statements | Not stored unless the user ticks "Save to Documents". Then the file goes through the existing documents code, so it gets the same duplicate-name numbering and permissions. The upload row links to the document. |
@@ -197,7 +198,12 @@ pickers answering 401 when not connected. **Not checked here** (needs a real Goo
 the token exchange, listing and creating spreadsheets and tabs, and sending, including the
 type overwrite on a tab that already has the rows.
 
-## Step 5: Docs and clean-up
+## Step 5: Docs and clean-up ✅
+
+Done: README "Statements" section (including the Google Cloud setup), the extra redirect
+URI in the sign-in steps and `.env.example`, and the POC spec in
+`docs/statements-iq-spec.md` with a note on what changed.
+
 
 - README section for Statements, and the POC spec kept as `docs/statements-iq-spec.md`
   for history.

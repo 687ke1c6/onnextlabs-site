@@ -19,6 +19,7 @@ All settings are env vars (or matching `--flags`; see `cargo run -- --help`). Se
 1. In Google Cloud console, create an OAuth client ID (type: Web application) and add the
    redirect URI `<PUBLIC_URL>/api/auth/callback/google` for each environment
    (e.g. `http://localhost:5173/api/auth/callback/google` and `https://<your-domain>/api/auth/callback/google`).
+   For [Statements](#statements) in Google Sheets, also add `<PUBLIC_URL>/api/statements/google/callback`.
 2. Set `PUBLIC_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 3. Set `ADMIN_EMAILS` to your Google address. `/login` signs you in and lands on `/portal`.
 
@@ -122,6 +123,43 @@ the volume underneath it show up only when the cache expires, so if people do th
 files you add to `data-dav/` by hand show up quickly.
 
 [`rclone serve webdav`]: https://rclone.org/commands/rclone_serve_webdav/
+
+### Statements
+Each organisation has a **Statements** section (`/portal/<slug>/statements`, needs
+`read-statements`). Someone with `write-statements` drops in a bank statement CSV (only
+Standard Bank CSV so far), checks the preview, and saves it. Saving stores every row in the
+database:
+
+- Each row's id is the n8n hash of its date, description and amount, the same id the
+  existing Google Sheets use. A row is stored once per organisation and account, so saving
+  a statement again (or one that overlaps) updates rows instead of duplicating them.
+- **Type rules** (Statements → Type rules) set each row's `type` when it's saved. They're
+  per organisation and tried in order, and the first match wins. A row no rule matches keeps
+  the type it already had, so re-saving a statement re-applies changed rules without wiping
+  types.
+- "Also save the file to Documents" (needs `write-docs`) puts a copy of the original file in
+  Documents, in a `Statements` folder by default.
+- Deleting a saved statement deletes the rows no other saved statement contains. A copy in
+  Documents stays.
+
+From a saved statement, anyone with `read-statements` can **send it to their own Google
+Sheet**. "Connect Google Sheets" asks Google for access to their spreadsheets (separately
+from signing in), then they pick or create a spreadsheet and tab. Every row is sent: rows
+whose id isn't in the tab are added (with a header row on an empty tab), and rows already
+there get their `type` cell updated. Nothing else in an existing row is changed, and a blank
+type never replaces one. The connection is held in server memory for about an hour and
+never stored; a restart forgets it.
+
+Google Sheets uses the sign-in OAuth client (`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`), so
+it's on whenever sign-in is. In Google Cloud console:
+1. Add the redirect URI `<PUBLIC_URL>/api/statements/google/callback` to the client.
+2. Enable the **Google Sheets API** and the **Google Drive API** for the project.
+3. On the OAuth consent screen, add the scopes `.../auth/spreadsheets` and
+   `.../auth/drive.metadata.readonly`. `spreadsheets` is a *sensitive* scope: while the
+   app's publishing status is **Testing**, only its test users (up to 100) can connect, and
+   they see an "unverified app" notice once. Opening it to everyone needs Google's
+   verification. Signing in to the portal is unaffected either way: it only asks for
+   identity.
 
 ## Build & run with Docker
 ```sh
