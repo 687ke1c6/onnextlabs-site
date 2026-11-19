@@ -102,7 +102,7 @@ export function DataGrid<T>(props: {
   const [filters, setFilters] = createSignal<ColumnFiltersState>([]);
   const [query, setQuery] = createSignal("");
   const [visibility, setVisibility] = createSignal<VisibilityState>(initialVisibility(props.storageKey, props.defaultHidden ?? []));
-  const [pagination, setPagination] = createSignal({ pageIndex: 0, pageSize: 50 });
+  const [pagination, setPagination] = createSignal({ pageIndex: 0, pageSize: initialPageSize(props.storageKey) });
   const firstPage = () => setPagination((p) => ({ ...p, pageIndex: 0 }));
   let searchInput!: HTMLInputElement;
   onMount(gridMounted);
@@ -151,7 +151,17 @@ export function DataGrid<T>(props: {
         // storage blocked: just don't remember
       }
     },
-    onPaginationChange: setPagination,
+    onPaginationChange: (u) => {
+      const next = typeof u === "function" ? u(pagination()) : u;
+      if (next.pageSize !== pagination().pageSize) {
+        try {
+          localStorage.setItem(`${props.storageKey}:page-size`, String(next.pageSize));
+        } catch {
+          // storage blocked: just don't remember
+        }
+      }
+      setPagination(next);
+    },
     globalFilterFn: (row: Row<T>, _id, value: string) => {
       const q = value.trim().toLowerCase();
       return !q || props.search(row.original, q);
@@ -354,32 +364,32 @@ export function DataGrid<T>(props: {
           to the bottom of the window, so the figures stay in view while scrolling. */}
       <div
         role="status"
-        class="sticky bottom-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow-sm backdrop-blur"
+        class="sticky bottom-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border bg-background/95 px-2 py-0.5 text-[11px] leading-5 text-muted-foreground shadow-sm backdrop-blur"
       >
-        <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+        <div class="flex min-w-0 flex-wrap items-center gap-x-2.5">
           <span class="tabular-nums">
             {filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}
           </span>
           {props.status?.(filtered(), anyFilter())}
         </div>
-        <div class="flex flex-wrap items-center gap-2 sm:ml-auto">
-          <label class="flex items-center gap-1.5">
+        <div class="flex flex-wrap items-center gap-1.5 sm:ml-auto">
+          <label class="flex items-center gap-1">
             Per page
-            <select class={cn(SELECT, "h-7 px-1.5 text-xs")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
+            <select class={cn(SELECT, "h-5 rounded px-1 text-[11px]")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
               <For each={PAGE_SIZES}>{(n) => <option value={n}>{n === ALL_ROWS ? "All" : n}</option>}</For>
             </select>
           </label>
           <span class="tabular-nums">
             {firstShown()}–{lastShown()} of {filtered().length}
           </span>
-          <Button variant="outline" size="sm" class="h-7 px-2" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} aria-label="Previous page">
-            <ChevronLeft size={14} />
+          <Button variant="ghost" size="sm" class="h-5 rounded px-1" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} aria-label="Previous page">
+            <ChevronLeft size={12} />
           </Button>
-          <Button variant="outline" size="sm" class="h-7 px-2" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} aria-label="Next page">
-            <ChevronRight size={14} />
+          <Button variant="ghost" size="sm" class="h-5 rounded px-1" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} aria-label="Next page">
+            <ChevronRight size={12} />
           </Button>
         </div>
-        <div class="flex items-center gap-4 sm:border-l sm:border-border sm:pl-4">
+        <div class="flex items-center gap-3 sm:border-l sm:border-border sm:pl-3">
           <ToggleSwitch label="Compact" hint="One line per row, all the same height" on={compact()} onChange={setCompactGrids} />
           <ToggleSwitch label="Wide" hint="Use the full width of the window" on={wideGrids()} onChange={setWideGrids} />
         </div>
@@ -400,24 +410,35 @@ function ToggleSwitch(props: { label: string; hint: string; on: boolean; onChang
       aria-checked={props.on}
       title={props.hint}
       onClick={() => props.onChange(!props.on)}
-      class="inline-flex items-center gap-2 rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="inline-flex items-center gap-1.5 rounded text-[11px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       <span
         class={cn(
-          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-transparent transition-colors",
+          "relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full border border-transparent transition-colors",
           props.on ? "bg-primary" : "bg-input",
         )}
       >
         <span
           class={cn(
-            "inline-block h-4 w-4 rounded-full bg-background shadow transition-transform",
-            props.on ? "translate-x-4" : "translate-x-0",
+            "inline-block h-2.5 w-2.5 rounded-full bg-background shadow transition-transform",
+            props.on ? "translate-x-2.5" : "translate-x-0",
           )}
         />
       </span>
       {props.label}
     </button>
   );
+}
+
+/** Rows per page last chosen for this grid (`<storageKey>:page-size`), or 50. */
+function initialPageSize(key: string): number {
+  try {
+    const saved = Number(localStorage.getItem(`${key}:page-size`));
+    if (PAGE_SIZES.includes(saved)) return saved;
+  } catch {
+    // fall back to the default
+  }
+  return 50;
 }
 
 function initialVisibility(key: string, hidden: string[]): VisibilityState {

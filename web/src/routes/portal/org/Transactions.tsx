@@ -194,7 +194,7 @@ function AmountStat(props: { rows: OrgTransaction[] }) {
             <ChevronUp size={12} class="opacity-60" />
           </>
         }
-        triggerClass="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        triggerClass="inline-flex items-center gap-1 rounded px-1 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         class="w-40"
       >
         <For each={STATS}>{(s) => <StatChoice id={s.id} label={s.label} />}</For>

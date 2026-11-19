@@ -279,3 +279,7 @@ toolbar stay put, the grid fills what's left, and only its rows scroll, under pi
 and above the status bar. The grid keeps a minimum height (24rem); when the content above it is
 taller than the window allows (the statement preview on Uploads, or a short window), the page
 scrolls as before until the grid is in view. Other portal pages scroll normally.
+
+Status bar settings are all remembered per browser: Compact and Wide (`grid-compact`,
+`grid-wide`), the Amount figure (`statements-amount-stat`), and rows per page for each grid
+(`<grid storage key>:page-size`). The bar itself is compact: 11px text, minimal padding.
