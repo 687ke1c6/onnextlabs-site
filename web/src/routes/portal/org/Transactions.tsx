@@ -165,7 +165,7 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
   const error = () => rows.error ?? props.acct.accounts.error;
 
   return (
-    <div class="mt-6">
+    <div class="mt-6 flex min-h-0 flex-1 flex-col">
       <Show when={error()}>
         {(e) => <p class="text-sm text-red-500">{e() instanceof Error ? (e() as Error).message : "Couldn't load transactions."}</p>}
       </Show>
@@ -216,11 +216,12 @@ function Transactions() {
     return a ? `Every transaction saved for account ${accountLabel(a.number)}.` : `Transactions saved for ${org.name}.`;
   };
   return (
-    <>
+    // Hands its leftover height down to the grid (see `pageHasGrid`).
+    <div class="flex min-h-0 flex-1 flex-col">
       <PageHeader title="Statements" description={description()} actions={<AccountPicker state={acct} />} />
       <StatementsTabs />
       <TransactionsView acct={acct} />
-    </>
+    </div>
   );
 }
 

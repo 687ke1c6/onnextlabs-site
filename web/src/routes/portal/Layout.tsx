@@ -24,7 +24,7 @@ import { can, fetchMyOrgs, type Org } from "~/lib/orgs";
 import type { Permission } from "~/lib/roles";
 import { theme } from "~/lib/theme";
 import { cn, settled } from "~/lib/utils";
-import { pageIsWide } from "~/lib/view";
+import { pageHasGrid, pageIsWide } from "~/lib/view";
 
 type Portal = {
   user: User;
@@ -390,7 +390,12 @@ export function PortalLayout() {
       <Match when={allowed()}>
         {(user) => (
           <div
-            class={cn("flex min-h-screen bg-background text-foreground", theme() === "light" && "light")}
+            class={cn(
+              "flex bg-background text-foreground",
+              // Grid pages: a window-high frame; the content area scrolls only if it must.
+              pageHasGrid() ? "h-dvh overflow-hidden" : "min-h-screen",
+              theme() === "light" && "light",
+            )}
             style={{ "color-scheme": theme() }}
           >
             <PortalContext.Provider
@@ -402,8 +407,14 @@ export function PortalLayout() {
               }}
             >
               <Rail user={user()} orgs={settled(orgs) ?? []} onSignOut={signOut} />
-              <main class="min-w-0 flex-1 px-4 py-8 sm:px-8">
-                <div class={cn("mx-auto w-full", pageIsWide() ? "max-w-none" : "max-w-5xl")}>
+              <main class={cn("min-w-0 flex-1 px-4 py-8 sm:px-8", pageHasGrid() && "overflow-y-auto")}>
+                <div
+                  class={cn(
+                    "mx-auto w-full",
+                    pageIsWide() ? "max-w-none" : "max-w-5xl",
+                    pageHasGrid() && "flex h-full flex-col",
+                  )}
+                >
                   <Outlet />
                 </div>
               </main>

@@ -187,7 +187,8 @@ export function DataGrid<T>(props: {
   const lastShown = () => Math.min(filtered().length, (pagination().pageIndex + 1) * pagination().pageSize);
 
   return (
-    <div class="flex flex-col gap-3">
+    // Fills the space the page leaves it (see `pageHasGrid`); only the table area scrolls.
+    <div class="flex min-h-[24rem] flex-1 flex-col gap-3">
       {/* Toolbar */}
       <div class="flex flex-wrap items-end gap-2">
         <div class="relative min-w-0 flex-[2_1_14rem]">
@@ -229,12 +230,13 @@ export function DataGrid<T>(props: {
       </div>
 
       {/* Table */}
-      <div class="overflow-x-auto rounded-xl border border-border">
+      <div class="min-h-0 flex-1 overflow-auto rounded-xl border border-border">
         <table class={cn("w-full min-w-[44rem] text-sm", compact() && "table-fixed")}>
-          <thead class="border-b border-border bg-secondary/30 text-left text-xs text-muted-foreground">
+          {/* Pinned while the rows scroll; opaque so rows don't show through. */}
+          <thead class="sticky top-0 z-10 bg-background text-left text-xs text-muted-foreground shadow-[inset_0_-1px_0_var(--color-border)]">
             <For each={table.getHeaderGroups()}>
               {(group) => (
-                <tr>
+                <tr class="bg-secondary/30">
                   <For each={group.headers}>
                     {(h) => {
                       const m = meta<T>(h.column.columnDef.meta);

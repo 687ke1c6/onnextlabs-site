@@ -270,3 +270,11 @@ Transactions shows the **sum of Amount** for the rows that pass the filters (all
 are on), per currency, with money in and out in its tooltip. Uploads shows how many rows the listed statements
 hold. The separate summary line under the toolbar is gone; the multi-column sort hint is now the
 header buttons' tooltip.
+
+## Step 11: Only the grid scrolls ✅
+
+On pages with a grid, the portal frame is exactly the window's height: the page header, tabs and
+toolbar stay put, the grid fills what's left, and only its rows scroll, under pinned column headers
+and above the status bar. The grid keeps a minimum height (24rem); when the content above it is
+taller than the window allows (the statement preview on Uploads, or a short window), the page
+scrolls as before until the grid is in view. Other portal pages scroll normally.

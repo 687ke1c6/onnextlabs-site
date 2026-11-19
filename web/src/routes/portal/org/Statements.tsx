@@ -334,7 +334,7 @@ function UploadsList(props: { acct: ReturnType<typeof useStatementAccount> }) {
   const error = () => uploads.error ?? props.acct.accounts.error;
 
   return (
-    <section class="mt-8">
+    <section class="mt-8 flex min-h-0 flex-1 flex-col">
       <h2 class="mb-3 text-sm font-medium">Saved statements</h2>
       <Show when={error()}>
         <p class="text-sm text-red-500">{errorText(error(), "Couldn't load statements.")}</p>
@@ -379,7 +379,8 @@ function Uploads() {
   const org = useOrg();
   const acct = useStatementAccount();
   return (
-    <>
+    // Hands its leftover height down to the grid (see `pageHasGrid`).
+    <div class="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Statements"
         description="Statement files saved for this account. Open one to see its rows or send them to your own Google Sheet."
@@ -390,7 +391,7 @@ function Uploads() {
         <UploadPanel onSaved={(account) => acct.pick(account)} />
       </Show>
       <UploadsList acct={acct} />
-    </>
+    </div>
   );
 }
 

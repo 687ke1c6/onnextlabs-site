@@ -32,5 +32,11 @@ const [gridsShown, setGridsShown] = createSignal(0);
 export const gridMounted = () => setGridsShown((n) => n + 1);
 export const gridUnmounted = () => setGridsShown((n) => Math.max(0, n - 1));
 
+/**
+ * Whether a grid is on the page: the portal's content area is then exactly the window's height
+ * and the grid fills what's left, so only its rows scroll.
+ */
+export const pageHasGrid = () => gridsShown() > 0;
+
 /** Whether the portal's content area should drop its max width. */
 export const pageIsWide = () => wideGrids() && gridsShown() > 0;
