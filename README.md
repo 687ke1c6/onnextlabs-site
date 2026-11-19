@@ -40,6 +40,8 @@ Signing in alone grants nothing. Access comes from:
   | ------------- | ------------------------------------------------------------------- |
   | `read-docs`   | Browse documents, download private ones                             |
   | `write-docs`  | Upload documents, create folders                                    |
+  | `read-statements`  | View saved bank statements; add them to your own Google Sheet  |
+  | `write-statements` | Upload and delete bank statements; edit the type rules         |
   | `manage-orgs` | Add and remove members, change their roles (`/portal/organisations`) |
   | `write-roles` | Create, edit and delete roles (site-wide, since roles are shared)   |
 

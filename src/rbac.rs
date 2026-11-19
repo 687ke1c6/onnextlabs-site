@@ -41,13 +41,17 @@ pub enum Permission {
     WriteDocs,
     ManageOrgs,
     WriteRoles,
+    ReadStatements,
+    WriteStatements,
 }
 
 impl Permission {
     /// Every permission, in display order.
-    pub const ALL: [Permission; 4] = [
+    pub const ALL: [Permission; 6] = [
         Permission::ReadDocs,
         Permission::WriteDocs,
+        Permission::ReadStatements,
+        Permission::WriteStatements,
         Permission::ManageOrgs,
         Permission::WriteRoles,
     ];
@@ -59,6 +63,8 @@ impl Permission {
             Permission::WriteDocs => "write-docs",
             Permission::ManageOrgs => "manage-orgs",
             Permission::WriteRoles => "write-roles",
+            Permission::ReadStatements => "read-statements",
+            Permission::WriteStatements => "write-statements",
         }
     }
 
@@ -75,6 +81,12 @@ impl Permission {
             Permission::ManageOrgs => "Add and remove members and change their roles.",
             Permission::WriteRoles => {
                 "Create, edit and delete roles. Roles are shared by every organisation."
+            }
+            Permission::ReadStatements => {
+                "View saved bank statements and their transactions, and add them to your own Google Sheet."
+            }
+            Permission::WriteStatements => {
+                "Upload and delete bank statements, and edit the organisation's type rules."
             }
         }
     }

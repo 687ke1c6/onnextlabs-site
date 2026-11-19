@@ -1,7 +1,13 @@
 import { json, send } from "~/lib/orgs";
 
 /** Permission keys, fixed by the server (src/rbac.rs). */
-export type Permission = "read-docs" | "write-docs" | "manage-orgs" | "write-roles";
+export type Permission =
+  | "read-docs"
+  | "write-docs"
+  | "read-statements"
+  | "write-statements"
+  | "manage-orgs"
+  | "write-roles";
 
 export type PermissionInfo = { key: Permission; description: string };
 

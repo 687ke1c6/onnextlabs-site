@@ -133,7 +133,7 @@ dependencies). Notes:
 - Update the Dockerfile's dependency-caching stage for the workspace.
 - `just check` and `cargo test` pass, and the synthetic n8n parity test still runs.
 
-## Step 1: Schema and permissions
+## Step 1: Schema and permissions ✅
 
 - Migration `0011_statements.sql`: the tables above, plus the two permissions granted to
   `Admin-org`.
