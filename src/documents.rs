@@ -74,6 +74,7 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
                 .layer(DefaultBodyLimit::max(body_limit)),
         )
         .route("/api/orgs/{org}/documents/folders", get(all_folders))
+        .route("/api/orgs/{org}/documents/all", get(all_documents))
         .route("/api/documents/{id}/download", get(download))
         .route("/api/documents/{id}", delete(delete_missing))
 }
@@ -236,6 +237,36 @@ fn unrecorded<'a>(stored: &'a [FileInfo], documents: &[Document]) -> Vec<&'a Fil
         .iter()
         .filter(|f| is_clean(&f.name) && !known.contains(f.name.as_str()))
         .collect()
+}
+
+/// Whether a document's file is in storage. Storage errors count as "don't know" (true), so a
+/// storage blip doesn't flag every document as missing.
+pub async fn file_exists(state: &AppState, org: &Org, folder: &str, filename: &str) -> bool {
+    let Ok(path) = folder_path(org, folder).and_then(|d| {
+        d.join(filename)
+            .map_err(|_| bad_request("Invalid file name."))
+    }) else {
+        return false;
+    };
+    state.storage.exists(&path).await.unwrap_or(true)
+}
+
+/// GET /api/orgs/{org}/documents/all — every document in the org, from the database only (no
+/// storage listing), for pickers. `read-docs`.
+async fn all_documents(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+) -> Result<Json<Vec<Document>>, Response> {
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadDocs).await?;
+    let docs = sqlx::query_as(select_document!(
+        "WHERE d.org_id = ? ORDER BY d.folder COLLATE NOCASE, d.filename COLLATE NOCASE"
+    ))
+    .bind(org.id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_error)?;
+    Ok(Json(docs))
 }
 
 /// GET /api/orgs/{org}/documents/folders — every folder path, for the upload destination

@@ -99,6 +99,10 @@ export function DataGrid<T>(props: {
   status?: (rows: T[], filtering: boolean) => JSX.Element;
   /** e.g. ["row", "rows"]. */
   noun: [string, string];
+  /** Clicking a row (not a control in it) calls this, e.g. to open its details. */
+  onRowClick?: (row: T) => void;
+  /** Highlights a row, e.g. the one whose details are open. */
+  isSelected?: (row: T) => boolean;
 }) {
   const [sorting, setSorting] = createSignal<SortingState>(props.initialSorting ?? []);
   const [filters, setFilters] = createSignal<ColumnFiltersState>([]);
@@ -335,7 +339,18 @@ export function DataGrid<T>(props: {
               }
             >
               {(row) => (
-                <tr class="border-b border-border last:border-0 hover:bg-accent/30">
+                <tr
+                  class={cn(
+                    "border-b border-border last:border-0",
+                    props.isSelected?.(row.original) ? "bg-accent/60" : "hover:bg-accent/30",
+                    props.onRowClick && "cursor-pointer",
+                  )}
+                  onClick={(e) => {
+                    // Controls in a cell (a type dropdown, a link) do their own thing.
+                    if ((e.target as HTMLElement).closest("a, button, select, input, label")) return;
+                    props.onRowClick?.(row.original);
+                  }}
+                >
                   <For each={row.getVisibleCells()}>
                     {(cell) => (
                       <td

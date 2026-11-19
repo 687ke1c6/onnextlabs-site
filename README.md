@@ -142,6 +142,14 @@ Bank CSV so far), checks the preview, and saves it. Saving stores every row in t
 - Each row's id is the n8n hash of its date, description and amount, the same id the
   existing Google Sheets use. A row is stored once per organisation and account, so saving
   a statement again (or one that overlaps) updates rows instead of duplicating them.
+- **Types** are a list per organisation (Statements → Type rules): add, rename (renames it
+  on every row and rule) or delete one nobody uses. In the Transactions grid, people with
+  `write-statements` can pick a row's type from the list. A picked type is *hand-set*: saving
+  a statement never changes it. Clearing it lets the next save type the row from the rules.
+- **Documents on rows**: click a row to open its details at the side, with the statement(s)
+  it came from and the documents attached to it. Attach any existing document from Documents
+  (`write-statements` and `read-docs`), or remove a link; the document itself is never
+  changed. The grid's Docs column shows how many each row has.
 - **Type rules** (Statements → Type rules) set each row's `type` when it's saved. They're
   per organisation and tried in order, and the first match wins. A row no rule matches keeps
   the type it already had, so re-saving a statement re-applies changed rules without wiping

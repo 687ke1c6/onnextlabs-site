@@ -298,3 +298,16 @@ Status bar settings are all remembered per browser: the Compact and Wide toggle 
 | Row documents | Many-to-many links between rows and existing Documents (`statement_transaction_documents`). Attaching or removing a link never touches the document; a link whose file is gone shows "File missing". Attach from existing Documents only (no upload here). Attaching or removing needs `write-statements` and `read-docs`; opening a private file needs `read-docs` as usual. |
 | Row panel | Clicking a row opens a side panel: details, type (editable), source statement(s) and their files, attached documents (open, remove, "Attach existing" with a searchable picker). A 📎 column shows each row's attachment count. |
 | Google Sheets | Unchanged. Types travel as before; attachments never go to sheets. |
+
+## Build order (part 2)
+
+A. ✅ Types list (`statement_types`, migration 0012, `src/statement_types.rs`), rules choose from it,
+   hand-set types (`type_manual`), the grid's Type cell as a dropdown with a hand-set marker.
+B. ✅ The statement file always kept in Documents: `Statements/<account>`, on the uploader's
+   behalf, **private** (statement copies were public before, as all document uploads are), reusing
+   an identical document (same SHA-256). The upload panel says where it goes.
+C. ✅ Row panel and attachments (`src/statement_rows.rs`): row details, source statements and their
+   files, attached documents (attach from a searchable list of the org's Documents,
+   `GET /api/orgs/{slug}/documents/all`; remove the link), missing files flagged. The grid gets a
+   Docs column and opens the panel on a row click.
+

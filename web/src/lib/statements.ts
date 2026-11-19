@@ -199,3 +199,34 @@ export const setRowType = async (org: string, row: number, type: string | null) 
     "Couldn't change the type.",
   );
 
+
+// ---- one row ----
+
+export type RowDetail = OrgTransaction & {
+  /** Saved statements containing the row, with their files in Documents. */
+  uploads: { id: number; filename: string; uploaded_at: string; document_id: number | null }[];
+  /** Documents attached to the row. */
+  documents: {
+    document_id: number;
+    folder: string;
+    filename: string;
+    content_type: string | null;
+    size: number;
+    attached_at: string;
+    attached_by: string | null;
+    /** Its file is gone from storage. */
+    missing: boolean;
+  }[];
+};
+
+const row = (org: string, id: number) => `${base(org)}/statement-transactions/${id}`;
+
+export const fetchRow = async (org: string, id: number) => json<RowDetail>(await fetch(row(org, id)), "Couldn't load the row.");
+
+/** Links an existing document to the row. */
+export const attachDocument = async (org: string, id: number, documentId: number) =>
+  json<RowDetail>(await send("POST", `${row(org, id)}/documents`, { document_id: documentId }), "Couldn't attach the document.");
+
+/** Removes the link; the document itself stays. */
+export const detachDocument = async (org: string, id: number, documentId: number) =>
+  json<RowDetail>(await send("DELETE", `${row(org, id)}/documents/${documentId}`), "Couldn't remove the document.");

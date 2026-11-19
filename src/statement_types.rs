@@ -39,10 +39,6 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/api/orgs/{org}/statement-types/{id}",
             patch(rename_type).delete(delete_type),
         )
-        .route(
-            "/api/orgs/{org}/statement-transactions/{id}",
-            patch(set_row_type),
-        )
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -248,21 +244,22 @@ async fn delete_type(
 }
 
 #[derive(Deserialize)]
-struct RowTypeBody {
+pub struct RowTypeBody {
     /// A type on the list, or null / "" to clear it.
     #[serde(rename = "type")]
     category: Option<String>,
 }
 
 #[derive(Serialize)]
-struct RowTypeResult {
+pub struct RowTypeResult {
     #[serde(rename = "type")]
     category: Option<String>,
     type_manual: bool,
 }
 
 /// PATCH /api/orgs/{org}/statement-transactions/{id} — set or clear a row's type by hand.
-async fn set_row_type(
+/// (Routed by `statement_rows`, with the row's other endpoints.)
+pub async fn set_row_type(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
     UrlPath((slug, id)): UrlPath<(String, i64)>,

@@ -1,9 +1,10 @@
-import { createContext, createMemo, createResource, createSignal, For, Show, useContext } from "solid-js";
+import { createContext, createEffect, createMemo, createResource, createSignal, For, on, Show, useContext } from "solid-js";
 import { Link } from "@tanstack/solid-router";
 import type { ColumnDef } from "@tanstack/solid-table";
 import Check from "lucide-solid/icons/check";
 import ChevronUp from "lucide-solid/icons/chevron-up";
 import Hand from "lucide-solid/icons/hand";
+import Paperclip from "lucide-solid/icons/paperclip";
 import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Menu, menuItemClass, useMenu } from "~/components/ui/menu";
 import { can } from "~/lib/orgs";
@@ -21,6 +22,7 @@ import {
 import { cn, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
+import { RowPanel } from "~/routes/portal/org/RowPanel";
 import { AccountPicker, StatementsTabs, useStatementAccount } from "~/routes/portal/org/StatementParts";
 
 type Meta = GridColumnMeta<OrgTransaction>;
@@ -82,6 +84,19 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
     meta: { width: "w-44", pick: { options: (rows) => distinct(rows, (r) => r.type), emptyLabel: "No type" } } satisfies Meta,
   },
   {
+    accessorKey: "attachments",
+    header: "Docs",
+    cell: (c) => (
+      <Show when={c.getValue<number>() > 0} fallback={<span class="text-muted-foreground/50">—</span>}>
+        <span class="inline-flex items-center gap-1 text-muted-foreground" title={`${c.getValue<number>()} attached`}>
+          <Paperclip size={12} />
+          <span class="tabular-nums">{c.getValue<number>()}</span>
+        </span>
+      </Show>
+    ),
+    meta: { width: "w-20", label: "Documents attached" } satisfies Meta,
+  },
+  {
     accessorKey: "txn_id",
     header: "Id",
     cell: (c) => <span class="font-mono text-xs text-muted-foreground">{c.getValue<number>()}</span>,
@@ -99,7 +114,7 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
 type RowEditing = {
   canEdit: boolean;
   types: () => string[];
-  setType: (row: OrgTransaction, type: string | null) => Promise<void>;
+  setType: (rowId: number, type: string | null) => Promise<void>;
 };
 const RowEditingContext = createContext<RowEditing>();
 
@@ -136,7 +151,7 @@ function TypeCell(props: { row: OrgTransaction }) {
             const select = e.currentTarget;
             setBusy(true);
             try {
-              await edit!.setType(props.row, select.value || null);
+              await edit!.setType(props.row.id, select.value || null);
             } catch {
               select.value = props.row.type ?? ""; // put it back; the page shows the error
             } finally {
@@ -307,20 +322,21 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
   const gridKey = createMemo(() => (current() ? `account:${current()!.account}` : undefined));
 
   const [types, { refetch: refetchTypes }] = createResource(() => org.slug, fetchTypes);
+  /** Updates one row in place (the grid keeps its filters, sorting and page). */
+  const patchRow = (id: number, patch: Partial<OrgTransaction>) =>
+    mutate((d) => d && { ...d, rows: d.rows.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
+  // The row whose details are open in the side panel.
+  const [openRow, setOpenRow] = createSignal<number | null>(null);
+  createEffect(on(gridKey, () => setOpenRow(null)));
   const [editError, setEditError] = createSignal<string | null>(null);
   const editing: RowEditing = {
     canEdit: can(org, "write-statements"),
     types: () => (settled(types) ?? []).map((t) => t.name),
-    setType: async (row, type) => {
+    setType: async (rowId, type) => {
       setEditError(null);
       try {
-        const saved = await setRowType(org.slug, row.id, type);
-        mutate((d) =>
-          d && {
-            ...d,
-            rows: d.rows.map((r) => (r.id === row.id ? { ...r, type: saved.type, type_manual: saved.type_manual } : r)),
-          },
-        );
+        const saved = await setRowType(org.slug, rowId, type);
+        patchRow(rowId, { type: saved.type, type_manual: saved.type_manual });
       } catch (e) {
         setEditError(e instanceof Error ? e.message : "Couldn't change the type.");
         void refetchTypes(); // e.g. the type was renamed or deleted meanwhile
@@ -358,9 +374,22 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
                 defaultHidden={["currency", "txn_id", "updated_at"]}
                 noun={["row", "rows"]}
                 status={(shown) => <AmountStat rows={shown} />}
+                onRowClick={(r) => setOpenRow(r.id)}
+                isSelected={(r) => r.id === openRow()}
               />
             </RowEditingContext.Provider>
           </Show>
+        )}
+      </Show>
+      <Show when={openRow()} keyed>
+        {(id) => (
+          <RowPanel
+            rowId={id}
+            types={editing.types()}
+            setType={editing.setType}
+            onChanged={(c) => patchRow(c.id, { type: c.type, type_manual: c.type_manual, attachments: c.attachments })}
+            onClose={() => setOpenRow(null)}
+          />
         )}
       </Show>
     </div>
