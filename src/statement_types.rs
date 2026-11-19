@@ -22,6 +22,7 @@ use sqlx::SqlitePool;
 use crate::{
     api::{bad_request, db_error, error, not_found},
     auth::CurrentUser,
+    db, params,
     rbac::{self, Permission},
     AppState,
 };
@@ -167,34 +168,32 @@ async fn rename_type(
 
 /// The old name, or None if there's no such type in the org.
 async fn rename(db: &SqlitePool, org_id: i64, id: i64, name: &str) -> sqlx::Result<Option<String>> {
-    let mut tx = db.begin().await?;
-    let old: Option<String> =
-        sqlx::query_scalar("SELECT name FROM statement_types WHERE id = ? AND org_id = ?")
-            .bind(id)
-            .bind(org_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some(old) = old else {
-        return Ok(None);
-    };
-    sqlx::query("UPDATE statement_types SET name = ? WHERE id = ?")
-        .bind(name)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    for table in [
-        "UPDATE statement_transactions SET type = ?1 WHERE org_id = ?2 AND type = ?3",
-        "UPDATE statement_type_rules SET type = ?1 WHERE org_id = ?2 AND type = ?3",
-    ] {
-        sqlx::query(table)
-            .bind(name)
-            .bind(org_id)
-            .bind(&old)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
-    Ok(Some(old))
+    // One batch: rows and rules move to the new name first (matching the old name by
+    // subquery), then the type itself. With no such type, nothing matches and nothing changes.
+    let mut batch = db::Batch::new();
+    let old = batch.push(
+        "SELECT name FROM statement_types WHERE id = ? AND org_id = ?",
+        params![id, org_id],
+    );
+    batch.push(
+        "UPDATE statement_transactions SET type = ?1
+         WHERE org_id = ?2 AND type = (SELECT name FROM statement_types WHERE id = ?3 AND org_id = ?2)",
+        params![name, org_id, id],
+    );
+    batch.push(
+        "UPDATE statement_type_rules SET type = ?1
+         WHERE org_id = ?2 AND type = (SELECT name FROM statement_types WHERE id = ?3 AND org_id = ?2)",
+        params![name, org_id, id],
+    );
+    batch.push(
+        "UPDATE statement_types SET name = ?1 WHERE id = ?3 AND org_id = ?2",
+        params![name, org_id, id],
+    );
+    let mut results = db::run(db, batch).await?;
+    Ok(results
+        .swap_remove(old)
+        .into_first()
+        .and_then(db::Value::into_string))
 }
 
 /// DELETE /api/orgs/{org}/statement-types/{id} — only if no row or rule uses it.
@@ -327,5 +326,91 @@ mod tests {
         assert!(clean_name("  ").is_err());
         assert!(clean_name(&"x".repeat(101)).is_err());
         assert!(clean_name("A\u{7}B").is_err());
+    }
+
+    async fn exec(db: &SqlitePool, sql: &'static str) {
+        sqlx::query(sql).execute(db).await.unwrap();
+    }
+
+    async fn types_in_use(db: &SqlitePool) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT 'row', type FROM statement_transactions WHERE type IS NOT NULL
+             UNION ALL SELECT 'rule', type FROM statement_type_rules ORDER BY 1, 2",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rename_moves_rows_and_rules_and_only_in_its_org() {
+        let db = db::test_db().await;
+        exec(
+            &db,
+            "INSERT INTO organisations (id, slug, name) VALUES (1, 'a', 'A'), (2, 'b', 'B')",
+        )
+        .await;
+        exec(&db, "INSERT INTO statement_accounts (id, org_id, name) VALUES (1, 1, 'Main'), (2, 2, 'Main')").await;
+        exec(
+            &db,
+            "INSERT INTO statement_types (id, org_id, name) VALUES (1, 1, 'Fees'), (2, 2, 'Fees')",
+        )
+        .await;
+        exec(&db, "INSERT INTO statement_transactions (org_id, account_id, txn_id, date, amount, description, currency, type)
+                   VALUES (1, 1, 1, '2026-01-01', '1', 'x', 'ZAR', 'Fees'),
+                          (1, 1, 2, '2026-01-01', '1', 'y', 'ZAR', NULL),
+                          (2, 2, 1, '2026-01-01', '1', 'x', 'ZAR', 'Fees')").await;
+        exec(
+            &db,
+            "INSERT INTO statement_type_rules (org_id, account_id, position, type, contains)
+                   VALUES (1, 1, 0, 'Fees', '[]'), (2, 2, 0, 'Fees', '[]')",
+        )
+        .await;
+
+        assert_eq!(
+            rename(&db, 1, 1, "Charges").await.unwrap(),
+            Some("Fees".into())
+        );
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            types_in_use(&db).await,
+            pairs(&[
+                ("row", "Charges"),
+                ("row", "Fees"),
+                ("rule", "Charges"),
+                ("rule", "Fees")
+            ])
+        );
+
+        // Another org's id, or none at all: nothing found, nothing changed.
+        assert_eq!(rename(&db, 1, 2, "Other").await.unwrap(), None);
+        assert_eq!(rename(&db, 1, 99, "Other").await.unwrap(), None);
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM statement_types ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(names, ["Charges", "Fees"]);
+
+        // A name taken in the org fails and rolls the whole rename back.
+        exec(
+            &db,
+            "INSERT INTO statement_types (id, org_id, name) VALUES (3, 1, 'Bank')",
+        )
+        .await;
+        let err = rename(&db, 1, 1, "bank").await.unwrap_err();
+        assert!(matches!(err, sqlx::Error::Database(ref d) if d.is_unique_violation()));
+        assert_eq!(
+            types_in_use(&db).await,
+            pairs(&[
+                ("row", "Charges"),
+                ("row", "Fees"),
+                ("rule", "Charges"),
+                ("rule", "Fees")
+            ])
+        );
     }
 }

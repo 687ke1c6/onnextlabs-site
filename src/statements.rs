@@ -14,7 +14,7 @@
 //! `write-docs`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -43,8 +43,9 @@ use crate::statement_accounts::{self, Account};
 use crate::{
     api::{bad_request, db_error, error, not_found},
     auth::CurrentUser,
-    documents,
+    db, documents,
     orgs::Org,
+    params,
     rbac::{self, Permission},
     AppState,
 };
@@ -566,120 +567,103 @@ async fn store_with(
     document_id: Option<i64>,
     picks: &Picks,
 ) -> sqlx::Result<i64> {
-    let mut tx = db.begin().await?;
-    let upload_id: i64 = sqlx::query_scalar(
+    // One batch, decided up front. New/updated counts follow the file: a row whose id was
+    // stored before is "updated"; one that wasn't is "new" the first time it appears and
+    // "updated" for any repeat. So new = distinct ids not yet stored; updated = the rest.
+    let ids: BTreeSet<i32> = st.transactions.iter().map(|t| t.id).collect();
+    let ids_json = serde_json::to_string(&ids).expect("ids serialise");
+    let parsed = st.transactions.len() as i64;
+
+    let mut batch = db::Batch::new();
+    let upload = batch.push(
         "INSERT INTO statement_uploads
              (org_id, account_id, format, account_number, filename, sha256, rows_parsed, rows_new,
               rows_updated, document_id, uploaded_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?) RETURNING id",
-    )
-    .bind(org.id)
-    .bind(account_id)
-    .bind(st.format.id())
-    .bind(stated_account(st))
-    .bind(filename)
-    .bind(sha256)
-    .bind(st.transactions.len() as i64)
-    .bind(document_id)
-    .bind(user_id)
-    .fetch_one(&mut *tx)
-    .await?;
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, n.new, ?7 - n.new, ?8, ?9
+         FROM (SELECT count(*) AS new FROM json_each(?10) j
+               WHERE NOT EXISTS (SELECT 1 FROM statement_transactions
+                                 WHERE account_id = ?2 AND txn_id = j.value)) n
+         RETURNING id",
+        params![
+            org.id,
+            account_id,
+            st.format.id(),
+            stated_account(st),
+            filename,
+            sha256,
+            parsed,
+            document_id,
+            user_id,
+            ids_json,
+        ],
+    );
 
-    let (mut new, mut updated) = (0i64, 0i64);
     for (position, t) in st.transactions.iter().enumerate() {
-        let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM statement_transactions WHERE account_id = ? AND txn_id = ?",
-        )
-        .bind(account_id)
-        .bind(t.id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let pick = picks.get(&t.id);
-        let row_id = match existing {
-            Some(id) if pick.is_some() => {
-                let chosen = pick.cloned().flatten();
-                sqlx::query(
-                    "UPDATE statement_transactions
-                     SET date = ?, amount = ?, description = ?, currency = ?, type = ?,
-                         type_manual = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?",
-                )
-                .bind(&t.date)
-                .bind(&t.amount)
-                .bind(&t.description)
-                .bind(&t.currency)
-                .bind(&chosen)
-                .bind(chosen.is_some())
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-                updated += 1;
-                id
-            }
-            Some(id) => {
-                // A hand-set type is never changed; otherwise a blank never replaces a type.
-                sqlx::query(
-                    "UPDATE statement_transactions
-                     SET date = ?, amount = ?, description = ?, currency = ?,
-                         type = CASE WHEN type_manual = 1 THEN type ELSE coalesce(?, type) END,
-                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?",
-                )
-                .bind(&t.date)
-                .bind(&t.amount)
-                .bind(&t.description)
-                .bind(&t.currency)
-                .bind(&t.category)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-                updated += 1;
-                id
-            }
-            None => {
-                new += 1;
-                let (category, manual) = match pick {
-                    Some(chosen) => (chosen.clone(), chosen.is_some()),
-                    None => (t.category.clone(), false),
-                };
-                sqlx::query_scalar(
-                    "INSERT INTO statement_transactions
-                         (org_id, account_id, txn_id, date, amount, description, currency, type,
-                          type_manual)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-                )
-                .bind(org.id)
-                .bind(account_id)
-                .bind(t.id)
-                .bind(&t.date)
-                .bind(&t.amount)
-                .bind(&t.description)
-                .bind(&t.currency)
-                .bind(&category)
-                .bind(manual)
-                .fetch_one(&mut *tx)
-                .await?
-            }
+        match picks.get(&t.id) {
+            // Picked in the preview: stored as hand-set (or blank and not hand-set).
+            Some(chosen) => batch.push(
+                "INSERT INTO statement_transactions
+                     (org_id, account_id, txn_id, date, amount, description, currency, type,
+                      type_manual)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (account_id, txn_id) DO UPDATE SET
+                     date = excluded.date, amount = excluded.amount,
+                     description = excluded.description, currency = excluded.currency,
+                     type = excluded.type, type_manual = excluded.type_manual,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                params![
+                    org.id,
+                    account_id,
+                    t.id,
+                    &t.date,
+                    &t.amount,
+                    &t.description,
+                    &t.currency,
+                    chosen.clone(),
+                    chosen.is_some(),
+                ],
+            ),
+            // From the rules: a hand-set type is never changed, and a blank never replaces one.
+            None => batch.push(
+                "INSERT INTO statement_transactions
+                     (org_id, account_id, txn_id, date, amount, description, currency, type,
+                      type_manual)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                 ON CONFLICT (account_id, txn_id) DO UPDATE SET
+                     date = excluded.date, amount = excluded.amount,
+                     description = excluded.description, currency = excluded.currency,
+                     type = CASE WHEN type_manual = 1 THEN type ELSE coalesce(excluded.type, type) END,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                params![
+                    org.id,
+                    account_id,
+                    t.id,
+                    &t.date,
+                    &t.amount,
+                    &t.description,
+                    &t.currency,
+                    t.category.clone(),
+                ],
+            ),
         };
-        // OR IGNORE: two rows of one file with the same id (on different days) share a row.
-        sqlx::query(
+        // The upload is the newest (AUTOINCREMENT, and a batch is the only writer while it
+        // runs). OR IGNORE: two rows of one file with the same id (on different days) share a
+        // row.
+        batch.push(
             "INSERT OR IGNORE INTO statement_upload_transactions (upload_id, transaction_id, position)
-             VALUES (?, ?, ?)",
-        )
-        .bind(upload_id)
-        .bind(row_id)
-        .bind(position as i64)
-        .execute(&mut *tx)
-        .await?;
+             VALUES ((SELECT max(id) FROM statement_uploads),
+                     (SELECT id FROM statement_transactions WHERE account_id = ? AND txn_id = ?),
+                     ?)",
+            params![account_id, t.id, position],
+        );
     }
-    sqlx::query("UPDATE statement_uploads SET rows_new = ?, rows_updated = ? WHERE id = ?")
-        .bind(new)
-        .bind(updated)
-        .bind(upload_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(upload_id)
+
+    let mut results = db::run(db, batch).await?;
+    results
+        .swap_remove(upload)
+        .into_first()
+        .and_then(|v| v.as_i64())
+        .ok_or(sqlx::Error::RowNotFound)
 }
 
 // ---- listing, viewing, deleting ----
@@ -963,39 +947,26 @@ async fn delete_preview(
 /// Deletes the upload, its rows that no other statement contains, and (by cascade) their
 /// links and attached-document links. Documents themselves stay.
 async fn delete_upload(db: &SqlitePool, org_id: i64, id: i64) -> sqlx::Result<Option<u64>> {
-    let mut tx = db.begin().await?;
-    let exists: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM statement_uploads WHERE id = ? AND org_id = ?")
-            .bind(id)
-            .bind(org_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if exists.is_none() {
-        return Ok(None);
-    }
-    let linked: Vec<i64> = sqlx::query_scalar(
-        "DELETE FROM statement_upload_transactions WHERE upload_id = ? RETURNING transaction_id",
-    )
-    .bind(id)
-    .fetch_all(&mut *tx)
-    .await?;
-    sqlx::query("DELETE FROM statement_uploads WHERE id = ?")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    let mut deleted = 0;
-    for row in linked {
-        deleted += sqlx::query(
-            "DELETE FROM statement_transactions WHERE id = ?1
-             AND NOT EXISTS (SELECT 1 FROM statement_upload_transactions WHERE transaction_id = ?1)",
-        )
-        .bind(row)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    }
-    tx.commit().await?;
-    Ok(Some(deleted))
+    // One batch: first the rows only this upload contains (their links and attached-document
+    // links go by cascade), then the upload and its remaining links. With no such upload in
+    // the org, neither statement matches anything.
+    let mut batch = db::Batch::new();
+    let rows = batch.push(
+        "DELETE FROM statement_transactions
+         WHERE id IN (SELECT l.transaction_id FROM statement_upload_transactions l
+                      JOIN statement_uploads u ON u.id = l.upload_id
+                      WHERE l.upload_id = ?1 AND u.org_id = ?2)
+           AND NOT EXISTS (SELECT 1 FROM statement_upload_transactions o
+                           WHERE o.transaction_id = statement_transactions.id
+                             AND o.upload_id <> ?1)",
+        params![id, org_id],
+    );
+    let upload = batch.push(
+        "DELETE FROM statement_uploads WHERE id = ? AND org_id = ?",
+        params![id, org_id],
+    );
+    let results = db::run(db, batch).await?;
+    Ok((results[upload].rows_affected > 0).then_some(results[rows].rows_affected))
 }
 
 // ---- type rules ----
@@ -1149,31 +1120,28 @@ async fn put_rules(
                 ))
             })?;
     }
-    let save = async {
-        let mut tx = state.db.begin().await?;
-        sqlx::query("DELETE FROM statement_type_rules WHERE account_id = ?")
-            .bind(account_id)
-            .execute(&mut *tx)
-            .await?;
-        for (position, r) in body.rules.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO statement_type_rules
-                     (org_id, account_id, position, type, contains, min_amount, max_amount)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(org.id)
-            .bind(account_id)
-            .bind(position as i64)
-            .bind(r.category.trim())
-            .bind(serde_json::to_string(&r.contains).unwrap_or_else(|_| "[]".into()))
-            .bind(r.min_amount)
-            .bind(r.max_amount)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await
-    };
-    save.await.map_err(db_error)?;
+    let mut batch = db::Batch::new();
+    batch.push(
+        "DELETE FROM statement_type_rules WHERE account_id = ?",
+        params![account_id],
+    );
+    for (position, r) in body.rules.iter().enumerate() {
+        batch.push(
+            "INSERT INTO statement_type_rules
+                 (org_id, account_id, position, type, contains, min_amount, max_amount)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                org.id,
+                account_id,
+                position,
+                r.category.trim(),
+                serde_json::to_string(&r.contains).unwrap_or_else(|_| "[]".into()),
+                r.min_amount,
+                r.max_amount,
+            ],
+        );
+    }
+    db::run(&state.db, batch).await.map_err(db_error)?;
     tracing::info!(org = %org.slug, account = account_id, rules = body.rules.len(), user = user.id, "type rules saved");
     Ok(Json(RulesResponse {
         rules: load_rules(&state.db, account_id).await?,
@@ -1372,6 +1340,32 @@ mod tests {
         let ids: Vec<i64> = st.transactions.iter().map(|t| i64::from(t.id)).collect();
         let stored: Vec<i64> = d2.transactions.iter().map(|t| t.txn_id).collect();
         assert_eq!(stored, ids);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_id_in_one_file_counts_as_new_once_then_updated() {
+        let (db, org, user) = test_db().await;
+        let mut st = parsed(&[]);
+        let n = st.transactions.len() as i64;
+        st.transactions.push(st.transactions[0].clone());
+        let id = store(&db, &org, user, "a.csv", "x", &st, None)
+            .await
+            .unwrap();
+        let d = upload_detail(&db, org.id, id).await.unwrap();
+        assert_eq!(
+            (
+                d.upload.rows_parsed,
+                d.upload.rows_new,
+                d.upload.rows_updated
+            ),
+            (n + 1, n, 1)
+        );
+        assert_eq!(
+            count(&db, "SELECT count(*) FROM statement_transactions").await,
+            n
+        );
+        // The repeat shares the first one's link (and position).
+        assert_eq!(d.transactions.len() as i64, n);
     }
 
     #[tokio::test]

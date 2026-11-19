@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
-use crate::{subscribe::client_ip, AppState};
+use crate::{db, params, subscribe::client_ip, AppState};
 
 const SESSION_COOKIE: &str = "sid";
 const STATE_COOKIE: &str = "oauth_state";
@@ -408,8 +408,9 @@ async fn start_session(
     ip: &str,
     user_agent: Option<String>,
 ) -> sqlx::Result<String> {
-    let mut tx = db.begin().await?;
-    let user_id: i64 = sqlx::query_scalar(
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+    let mut batch = db::Batch::new();
+    batch.push(
         "INSERT INTO users (issuer, subject, email, email_verified, name, picture)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (issuer, subject) DO UPDATE SET
@@ -417,31 +418,30 @@ async fn start_session(
              email_verified = excluded.email_verified,
              name = excluded.name,
              picture = excluded.picture,
-             last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         RETURNING id",
-    )
-    .bind(&id.issuer)
-    .bind(&id.subject)
-    .bind(&id.email)
-    .bind(id.email_verified)
-    .bind(&id.name)
-    .bind(&id.picture)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-    sqlx::query(
+             last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        params![
+            &id.issuer,
+            &id.subject,
+            id.email.clone(),
+            id.email_verified,
+            id.name.clone(),
+            id.picture.clone()
+        ],
+    );
+    batch.push(
         "INSERT INTO sessions (token_hash, user_id, ip, user_agent, expires_at)
-         VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))",
-    )
-    .bind(hash_token(&token))
-    .bind(user_id)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(format!("+{SESSION_DAYS} days"))
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+         VALUES (?, (SELECT id FROM users WHERE issuer = ? AND subject = ?), ?, ?,
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))",
+        params![
+            hash_token(&token),
+            &id.issuer,
+            &id.subject,
+            ip,
+            user_agent,
+            format!("+{SESSION_DAYS} days")
+        ],
+    );
+    db::run(db, batch).await?;
     Ok(token)
 }
 
@@ -585,6 +585,41 @@ mod tests {
             Some("/a\nb"),
         ] {
             assert_eq!(safe_return_to(bad), DEFAULT_RETURN_TO, "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sessions_upsert_the_user_and_link_to_them() {
+        let db = db::test_db().await;
+        let mut id = Identity {
+            issuer: "https://issuer".into(),
+            subject: "abc".into(),
+            email: Some("a@example.com".into()),
+            email_verified: true,
+            name: Some("A".into()),
+            picture: None,
+        };
+        let t1 = start_session(&db, &id, "1.2.3.4", None).await.unwrap();
+        id.name = Some("A2".into());
+        let t2 = start_session(&db, &id, "1.2.3.4", Some("ua".into()))
+            .await
+            .unwrap();
+        assert_ne!(t1, t2);
+
+        let users: Vec<(i64, Option<String>)> = sqlx::query_as("SELECT id, name FROM users")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].1.as_deref(), Some("A2"));
+        for t in [&t1, &t2] {
+            let owner: i64 =
+                sqlx::query_scalar("SELECT user_id FROM sessions WHERE token_hash = ?")
+                    .bind(hash_token(t))
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(owner, users[0].0);
         }
     }
 }
