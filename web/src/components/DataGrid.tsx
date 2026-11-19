@@ -67,13 +67,6 @@ export const pickFilter: FilterFn<any> = (row, id, ticked: string[]) => {
   return ticked.includes(text === "" ? EMPTY : text);
 };
 
-/** `[from, to]` (either may be empty) against a YYYY-MM-DD (or ISO timestamp) column. */
-// `any`: shared by every row type.
-export const dateRangeFilter: FilterFn<any> = (row, id, [from, to]: [string, string]) => {
-  const d = String(row.getValue(id) ?? "").slice(0, 10);
-  return (!from || d >= from) && (!to || d <= to);
-};
-
 /** Distinct non-empty values of `get`, as options, in `sort` order (alphabetical by default). */
 export function distinct<T>(rows: T[], get: (row: T) => string | null | undefined, sort?: (a: string, b: string) => number) {
   const values = [...new Set(rows.map(get).filter((v): v is string => !!v))];
@@ -81,7 +74,7 @@ export function distinct<T>(rows: T[], get: (row: T) => string | null | undefine
   return values.map((v) => ({ value: v, label: v }));
 }
 
-export type GridApi = {
+type GridApi = {
   filterValue: <V>(id: string, empty: V) => V;
   setFilter: (id: string, value: unknown) => void;
 };
@@ -97,8 +90,6 @@ export function DataGrid<T>(props: {
   storageKey: string;
   /** Columns hidden until the user shows them. */
   defaultHidden?: string[];
-  /** Extra toolbar controls (e.g. a date range), given access to the filters. */
-  toolbar?: (api: GridApi) => JSX.Element;
   /**
    * Extra figures for the status bar, given the rows that pass the filters and whether any
    * filter or search is active (e.g. a sum, shown only when filtering).
@@ -203,7 +194,6 @@ export function DataGrid<T>(props: {
             aria-label="Search"
           />
         </div>
-        {props.toolbar?.(api)}
         <Menu
           label="Columns"
           title="Show or hide columns"

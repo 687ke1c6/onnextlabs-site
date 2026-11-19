@@ -5,9 +5,8 @@ import Loader2 from "lucide-solid/icons/loader-circle";
 import UploadCloud from "lucide-solid/icons/cloud-upload";
 import X from "lucide-solid/icons/x";
 import type { ColumnDef } from "@tanstack/solid-table";
-import { DataGrid, dateRangeFilter, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
+import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Button } from "~/components/ui/button";
-import { Input } from "~/components/ui/input";
 import { fetchAllFolders } from "~/lib/documents";
 import { can } from "~/lib/orgs";
 import {
@@ -311,7 +310,6 @@ const uploadColumns: ColumnDef<UploadSummary, any>[] = [
     accessorKey: "uploaded_at",
     header: "Saved",
     cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{formatDate(c.getValue<string>())}</span>,
-    filterFn: dateRangeFilter,
     meta: { width: "w-32" } satisfies UploadMeta,
   },
 ];
@@ -356,17 +354,6 @@ function UploadsList(props: { acct: ReturnType<typeof useStatementAccount> }) {
             storageKey="statements-uploads-columns"
             defaultHidden={["rows_new", "rows_updated"]}
             noun={["statement", "statements"]}
-            toolbar={(grid) => {
-              const range = () => grid.filterValue<[string, string]>("uploaded_at", ["", ""]);
-              const set = (from: string, to: string) => grid.setFilter("uploaded_at", from || to ? [from, to] : undefined);
-              return (
-                <div class="flex min-w-0 flex-[2_1_16rem] items-center gap-1" title="When the statement was saved">
-                  <Input type="date" class="h-9 min-w-0" value={range()[0]} onInput={(e) => set(e.currentTarget.value, range()[1])} aria-label="Saved from" />
-                  <span class="text-muted-foreground">–</span>
-                  <Input type="date" class="h-9 min-w-0" value={range()[1]} onInput={(e) => set(range()[0], e.currentTarget.value)} aria-label="Saved until" />
-                </div>
-              );
-            }}
             status={(shown) => <span class="tabular-nums">{shown.reduce((n, u) => n + u.rows_parsed, 0)} rows in them</span>}
           />
         )}

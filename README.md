@@ -133,7 +133,7 @@ Each organisation has a **Statements** section (`/portal/<slug>/statements`, nee
 `read-statements`). An **Account** picker at the top chooses which bank account's statements
 the pages show (one at a time; it remembers your last choice). It opens on **Transactions**:
 every row saved for that account, in a grid you can search, filter (month and type from their
-column headers, plus a date range), sort (shift-click for more than one column) and page through, with totals for what's
+column headers), sort (shift-click for more than one column) and page through, with totals for what's
 shown and a choice of columns. `month` ("Aug 2024") is worked out from the date, exactly as
 the Google Sheet's `month` column is. **Uploads** lists the saved statement files in the same
 kind of grid, and there, someone with `write-statements` drops in a bank statement CSV (only Standard

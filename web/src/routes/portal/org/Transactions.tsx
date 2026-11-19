@@ -3,8 +3,7 @@ import { Link } from "@tanstack/solid-router";
 import type { ColumnDef } from "@tanstack/solid-table";
 import Check from "lucide-solid/icons/check";
 import ChevronUp from "lucide-solid/icons/chevron-up";
-import { DataGrid, dateRangeFilter, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
-import { Input } from "~/components/ui/input";
+import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Menu, menuItemClass, useMenu } from "~/components/ui/menu";
 import { can } from "~/lib/orgs";
 import {
@@ -35,7 +34,6 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
     accessorKey: "date",
     header: "Date",
     cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{formatDate(c.getValue<string>())}</span>,
-    filterFn: dateRangeFilter,
     meta: { width: "w-32" } satisfies Meta,
   },
   {
@@ -265,17 +263,6 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
               storageKey="statements-grid-columns"
               defaultHidden={["currency", "txn_id", "updated_at"]}
               noun={["row", "rows"]}
-              toolbar={(grid) => {
-                const range = () => grid.filterValue<[string, string]>("date", ["", ""]);
-                const set = (from: string, to: string) => grid.setFilter("date", from || to ? [from, to] : undefined);
-                return (
-                  <div class="flex min-w-0 flex-[2_1_16rem] items-center gap-1">
-                    <Input type="date" class="h-9 min-w-0" value={range()[0]} onInput={(e) => set(e.currentTarget.value, range()[1])} aria-label="From date" />
-                    <span class="text-muted-foreground">–</span>
-                    <Input type="date" class="h-9 min-w-0" value={range()[1]} onInput={(e) => set(range()[0], e.currentTarget.value)} aria-label="To date" />
-                  </div>
-                );
-              }}
               status={(shown) => <AmountStat rows={shown} />}
             />
           </Show>
