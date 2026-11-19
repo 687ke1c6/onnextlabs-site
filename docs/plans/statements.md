@@ -230,7 +230,7 @@ TanStack Table (`@tanstack/solid-table`). Uploads moved to their own tab
 - One grid component (`web/src/components/DataGrid.tsx`) serves both tabs: search, header filters,
   multi-column sorting, pagination, a column picker remembered per browser, a toolbar slot (the date
   range) and a summary line.
-- Header filters (a funnel in the column header, pick one value, or blanks) on Month, Account and Type
+- Header filters (a funnel in the column header: tick any number of values, or blanks; "All" clears) on Month, Account and Type
   in Transactions, and on Account and Saved by in Uploads. The toolbar account select is gone.
 - **Month** isn't stored: the API derives it from `date` with core's `row::month_label`, the same
   function that fills the sheet's `month` column, so the two always agree. It sorts and lists

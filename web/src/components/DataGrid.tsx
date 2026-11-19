@@ -47,8 +47,8 @@ export type GridColumnMeta<T> = {
   /** Name in the column picker (defaults to the header). */
   label?: string;
   /**
-   * A header filter: pick one value from these options (built from every row, so choosing one
-   * never hides the others). Compares against the column's value; `EMPTY` matches blanks.
+   * A header filter: tick any of these options (built from every row, so ticking one never
+   * hides the others); a row matches if its value is any ticked one. `EMPTY` matches blanks;
    * `emptyLabel` adds that choice.
    */
   pick?: { options: (rows: T[]) => FilterOption[]; emptyLabel?: string };
@@ -56,13 +56,13 @@ export type GridColumnMeta<T> = {
 
 const meta = <T,>(m: unknown) => (m ?? {}) as GridColumnMeta<T>;
 
-/** Filter for `pick` columns. */
+/** Filter for `pick` columns: the ticked values (`EMPTY` for blanks); none ticked = all rows. */
 // `any`: shared by every row type.
-export const pickFilter: FilterFn<any> = (row, id, value: string) => {
-  if (!value) return true;
+export const pickFilter: FilterFn<any> = (row, id, ticked: string[]) => {
+  if (!ticked?.length) return true;
   const v = row.getValue<unknown>(id);
   const text = v == null ? "" : String(v);
-  return value === EMPTY ? text === "" : text === value;
+  return ticked.includes(text === "" ? EMPTY : text);
 };
 
 /** `[from, to]` (either may be empty) against a YYYY-MM-DD (or ISO timestamp) column. */
@@ -270,8 +270,8 @@ export function DataGrid<T>(props: {
                                   name={m.label ?? String(h.column.columnDef.header)}
                                   options={pick().options(props.rows)}
                                   emptyLabel={pick().emptyLabel}
-                                  value={api.filterValue(h.column.id, "")}
-                                  onChange={(v) => api.setFilter(h.column.id, v || undefined)}
+                                  value={api.filterValue<string[]>(h.column.id, [])}
+                                  onChange={(v) => api.setFilter(h.column.id, v.length ? v : undefined)}
                                 />
                               )}
                             </Show>
@@ -408,21 +408,23 @@ function SortIcon(props: { dir: false | "asc" | "desc"; index: number; multi: bo
 }
 
 /**
- * Funnel button in a column header: a popover to pick one value (or all, or blank).
+ * Funnel button in a column header: a popover to tick any number of values (or blanks). It
+ * stays open while ticking; Escape, Tab or a click outside closes it. "All" clears the ticks.
  * Positioned against the viewport in a portal, so the table's scroll box can't clip it.
  */
 function HeaderFilter(props: {
   name: string;
   options: FilterOption[];
   emptyLabel?: string;
-  value: string;
-  onChange: (value: string) => void;
+  /** Ticked values; empty = no filter. */
+  value: string[];
+  onChange: (value: string[]) => void;
 }) {
   const [pos, setPos] = createSignal<{ top: number; left: number } | null>(null);
   let button!: HTMLButtonElement;
   let panel: HTMLDivElement | undefined;
 
-  const items = () => Array.from(panel?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? []);
+  const items = () => Array.from(panel?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? []);
   const close = (refocus = false) => {
     setPos(null);
     if (refocus) button.focus();
@@ -431,12 +433,10 @@ function HeaderFilter(props: {
     const r = button.getBoundingClientRect();
     const width = 224;
     setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left, window.innerWidth - width - 8)) });
-    queueMicrotask(() => (items().find((el) => el.getAttribute("aria-checked") === "true") ?? items()[0])?.focus());
+    queueMicrotask(() => items()[0]?.focus());
   };
-  const choose = (v: string) => {
-    props.onChange(v);
-    close(true);
-  };
+  const ticked = (v: string) => props.value.includes(v);
+  const toggle = (v: string) => props.onChange(ticked(v) ? props.value.filter((x) => x !== v) : [...props.value, v]);
 
   const onPointerDown = (e: PointerEvent) => {
     const t = e.target as Node;
@@ -472,13 +472,29 @@ function HeaderFilter(props: {
     list[next]?.focus();
   };
 
-  const current = createMemo(() =>
-    props.value === EMPTY ? props.emptyLabel : props.options.find((o) => o.value === props.value)?.label,
+  const names = createMemo(() =>
+    props.value.map((v) => (v === EMPTY ? props.emptyLabel : props.options.find((o) => o.value === v)?.label) ?? v),
   );
-  const label = () => (props.value ? `${props.name}: ${current() ?? props.value}` : `Filter by ${props.name.toLowerCase()}`);
-  const Option = (o: { value: string; children: JSX.Element }) => (
-    <button type="button" role="menuitemradio" aria-checked={props.value === o.value} onClick={() => choose(o.value)} class={menuItemClass}>
-      <Check size={14} class={cn("shrink-0", props.value !== o.value && "invisible")} />
+  const label = () =>
+    props.value.length === 0
+      ? `Filter by ${props.name.toLowerCase()}`
+      : `${props.name}: ${props.value.length > 3 ? `${props.value.length} selected` : names().join(", ")}`;
+
+  const Tick = (p: { on: boolean }) => (
+    <span
+      class={cn(
+        "flex h-4 w-4 shrink-0 items-center justify-center rounded border",
+        p.on ? "border-primary bg-primary text-primary-foreground" : "border-input",
+      )}
+    >
+      <Show when={p.on}>
+        <Check size={12} />
+      </Show>
+    </span>
+  );
+  const Choice = (o: { value: string; children: JSX.Element }) => (
+    <button type="button" role="menuitemcheckbox" aria-checked={ticked(o.value)} onClick={() => toggle(o.value)} class={menuItemClass}>
+      <Tick on={ticked(o.value)} />
       <span class="truncate">{o.children}</span>
     </button>
   );
@@ -494,11 +510,14 @@ function HeaderFilter(props: {
         title={label()}
         onClick={() => (pos() ? close() : open())}
         class={cn(
-          "flex h-6 w-6 items-center justify-center rounded hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          props.value && "bg-accent text-foreground",
+          "flex h-6 min-w-6 items-center justify-center gap-0.5 rounded px-1 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          props.value.length > 0 && "bg-accent text-foreground",
         )}
       >
         <Funnel size={12} />
+        <Show when={props.value.length > 0}>
+          <span class="text-[10px] font-semibold tabular-nums">{props.value.length}</span>
+        </Show>
       </button>
       <Show when={pos()}>
         {(p) => (
@@ -511,16 +530,25 @@ function HeaderFilter(props: {
               style={{ top: `${p().top}px`, left: `${p().left}px` }}
               class="fixed z-50 max-h-72 w-56 overflow-y-auto rounded-lg border border-border bg-background p-1 text-left text-sm font-normal text-foreground shadow-xl"
             >
-              <Option value="">All</Option>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={props.value.length === 0}
+                onClick={() => props.onChange([])}
+                class={menuItemClass}
+              >
+                <Tick on={props.value.length === 0} />
+                <span>All</span>
+              </button>
               <Show when={props.emptyLabel}>
-                <Option value={EMPTY}>
+                <Choice value={EMPTY}>
                   <span class="text-muted-foreground">{props.emptyLabel}</span>
-                </Option>
+                </Choice>
               </Show>
               <Show when={props.options.length > 0}>
                 <MenuSeparator />
               </Show>
-              <For each={props.options}>{(o) => <Option value={o.value}>{o.label}</Option>}</For>
+              <For each={props.options}>{(o) => <Choice value={o.value}>{o.label}</Choice>}</For>
             </div>
           </Portal>
         )}
