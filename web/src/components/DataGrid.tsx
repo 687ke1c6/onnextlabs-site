@@ -32,7 +32,9 @@ import { compactGrids, gridMounted, gridUnmounted, setCompactGrids, setWideGrids
 
 /** Header filter value meaning "rows where this column is empty". */
 export const EMPTY = "\u0000empty";
-const PAGE_SIZES = [25, 50, 100, 250];
+/** "All" is a page size larger than any list, so paging maths keeps working unchanged. */
+const ALL_ROWS = Number.MAX_SAFE_INTEGER;
+const PAGE_SIZES = [25, 50, 100, 250, 500, ALL_ROWS];
 
 export const SELECT =
   "h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -337,7 +339,7 @@ export function DataGrid<T>(props: {
           <label class="flex items-center gap-1.5">
             Per page
             <select class={cn(SELECT, "h-7 px-1.5 text-xs")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
-              <For each={PAGE_SIZES}>{(n) => <option value={n}>{n}</option>}</For>
+              <For each={PAGE_SIZES}>{(n) => <option value={n}>{n === ALL_ROWS ? "All" : n}</option>}</For>
             </select>
           </label>
           <span class="tabular-nums">
