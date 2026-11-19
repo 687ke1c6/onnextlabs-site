@@ -1,48 +1,10 @@
-import { createResource, For, Show } from "solid-js";
+import { For, Show } from "solid-js";
 import { Link } from "@tanstack/solid-router";
-import type { LucideIcon } from "lucide-solid";
 import Building2 from "lucide-solid/icons/building";
 import ChevronRight from "lucide-solid/icons/chevron-right";
-import Mail from "lucide-solid/icons/mail";
-import Users from "lucide-solid/icons/users";
 import { buttonVariants } from "~/components/ui/button";
 import { isAdmin } from "~/lib/auth";
-import { settled } from "~/lib/utils";
 import { PageHeader, usePortal } from "~/routes/portal/Layout";
-
-type Overview = { subscribers: number; users: number };
-
-function Stat(props: { label: string; value?: number; icon: LucideIcon }) {
-  return (
-    <div class="rounded-xl border border-border bg-secondary/20 p-4">
-      <div class="flex items-center justify-between text-muted-foreground">
-        <p class="text-xs">{props.label}</p>
-        <props.icon size={16} />
-      </div>
-      <p class="mt-1 text-2xl font-semibold tabular-nums">{props.value ?? "–"}</p>
-    </div>
-  );
-}
-
-/** Site-wide waitlist and account counts: admin-only data. */
-function AdminOverview() {
-  const [overview] = createResource<Overview>(async () => {
-    const res = await fetch("/api/admin/overview");
-    if (!res.ok) throw new Error(`overview: ${res.status}`);
-    return res.json();
-  });
-  return (
-    <>
-      <section class="mt-8 grid gap-4 sm:grid-cols-2">
-        <Stat label="Waitlist subscribers" value={settled(overview)?.subscribers} icon={Mail} />
-        <Stat label="Accounts" value={settled(overview)?.users} icon={Users} />
-      </section>
-      <Show when={overview.error}>
-        <p class="mt-4 text-sm text-red-500">Couldn't load the overview.</p>
-      </Show>
-    </>
-  );
-}
 
 /** /portal: the organisations the user can open. */
 export function PortalHomePage() {
@@ -63,10 +25,6 @@ export function PortalHomePage() {
           </Show>
         }
       />
-
-      <Show when={admin()}>
-        <AdminOverview />
-      </Show>
 
       <Show
         when={portal.orgs().length > 0}
