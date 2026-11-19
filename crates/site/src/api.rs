@@ -20,7 +20,7 @@ pub fn not_found(msg: &str) -> Response {
     error(StatusCode::NOT_FOUND, msg)
 }
 
-pub fn db_error(e: sqlx::Error) -> Response {
+pub fn db_error(e: crate::db::Error) -> Response {
     tracing::error!(error = %e, "database error");
     error(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.")
 }

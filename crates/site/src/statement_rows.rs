@@ -6,6 +6,7 @@
 //! Attaching or removing needs `write-statements` and `read-docs` (you pick from Documents);
 //! viewing needs `read-statements`, and opening a private file still needs `read-docs`.
 
+use crate::db::{self, Db};
 use std::sync::Arc;
 
 use axum::{
@@ -15,7 +16,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use statements_core::row::month_label;
 
 use crate::{
@@ -43,7 +43,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct RowFields {
     id: i64,
     txn_id: i64,
@@ -56,14 +56,13 @@ struct RowFields {
     description: String,
     currency: String,
     #[serde(rename = "type")]
-    #[sqlx(rename = "type")]
     category: Option<String>,
     type_manual: bool,
     updated_at: String,
 }
 
 /// A saved statement that contains the row, with its file in Documents.
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct SourceUpload {
     id: i64,
     filename: String,
@@ -71,7 +70,7 @@ struct SourceUpload {
     document_id: Option<i64>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct AttachedDocument {
     document_id: i64,
     folder: String,
@@ -82,7 +81,7 @@ struct AttachedDocument {
     /// Who attached it, if the account still exists.
     attached_by: Option<String>,
     /// The file isn't in storage any more.
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     missing: bool,
 }
 
@@ -96,7 +95,7 @@ struct RowDetail {
 }
 
 async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Response> {
-    let row: RowFields = sqlx::query_as(
+    let row: RowFields = db::query_as(
         "SELECT t.id, t.txn_id, t.account_id, a.name AS account_name,
                 a.identifier AS account_identifier, t.date, t.amount, t.description, t.currency,
                 t.type, t.type_manual, t.updated_at
@@ -109,7 +108,7 @@ async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Respo
     .await
     .map_err(db_error)?
     .ok_or_else(|| not_found("Row not found."))?;
-    let uploads = sqlx::query_as(
+    let uploads = db::query_as(
         "SELECT u.id, u.filename, u.uploaded_at, u.document_id
          FROM statement_upload_transactions l JOIN statement_uploads u ON u.id = l.upload_id
          WHERE l.transaction_id = ? ORDER BY u.uploaded_at, u.id",
@@ -130,8 +129,8 @@ async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Respo
     })
 }
 
-async fn attached(db: &SqlitePool, row_id: i64) -> sqlx::Result<Vec<AttachedDocument>> {
-    sqlx::query_as(
+async fn attached(db: &Db, row_id: i64) -> db::Result<Vec<AttachedDocument>> {
+    db::query_as(
         "SELECT d.id AS document_id, d.folder, d.filename, d.content_type, d.size, l.attached_at,
                 coalesce(u.name, u.email) AS attached_by
          FROM statement_transaction_documents l
@@ -196,14 +195,14 @@ enum Link {
 
 /// Links a document to a row, both in `org_id` (already linked is fine).
 async fn link(
-    db: &SqlitePool,
+    db: &Db,
     org_id: i64,
     row_id: i64,
     document_id: i64,
     user_id: i64,
-) -> sqlx::Result<Link> {
+) -> db::Result<Link> {
     let row: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM statement_transactions WHERE id = ? AND org_id = ?")
+        db::query_scalar("SELECT id FROM statement_transactions WHERE id = ? AND org_id = ?")
             .bind(row_id)
             .bind(org_id)
             .fetch_optional(db)
@@ -211,16 +210,15 @@ async fn link(
     if row.is_none() {
         return Ok(Link::NoRow);
     }
-    let doc: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM documents WHERE id = ? AND org_id = ?")
-            .bind(document_id)
-            .bind(org_id)
-            .fetch_optional(db)
-            .await?;
+    let doc: Option<i64> = db::query_scalar("SELECT id FROM documents WHERE id = ? AND org_id = ?")
+        .bind(document_id)
+        .bind(org_id)
+        .fetch_optional(db)
+        .await?;
     if doc.is_none() {
         return Ok(Link::NoDocument);
     }
-    sqlx::query(
+    db::query(
         "INSERT OR IGNORE INTO statement_transaction_documents (transaction_id, document_id, attached_by)
          VALUES (?, ?, ?)",
     )
@@ -250,8 +248,8 @@ async fn detach(
     Ok(Json(detail(&state, &org, id).await?))
 }
 
-async fn unlink(db: &SqlitePool, org_id: i64, row_id: i64, document_id: i64) -> sqlx::Result<bool> {
-    Ok(sqlx::query(
+async fn unlink(db: &Db, org_id: i64, row_id: i64, document_id: i64) -> db::Result<bool> {
+    Ok(db::query(
         "DELETE FROM statement_transaction_documents
          WHERE transaction_id = ?1 AND document_id = ?2
            AND EXISTS (SELECT 1 FROM statement_transactions WHERE id = ?1 AND org_id = ?3)",
@@ -269,18 +267,9 @@ async fn unlink(db: &SqlitePool, org_id: i64, row_id: i64, document_id: i64) -> 
 mod tests {
     use super::*;
 
-    async fn db() -> (SqlitePool, i64, i64, i64, i64) {
-        let db = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
-        let q = |sql: &'static str| sqlx::query_scalar::<_, i64>(sql);
+    async fn db() -> (Db, i64, i64, i64, i64) {
+        let db = db::test_db().await;
+        let q = |sql: &'static str| db::query_scalar::<i64>(sql);
         let org = q("INSERT INTO organisations (slug, name) VALUES ('a', 'A') RETURNING id")
             .fetch_one(&db)
             .await
@@ -293,14 +282,14 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        let account: i64 = sqlx::query_scalar(
+        let account: i64 = db::query_scalar(
             "INSERT INTO statement_accounts (org_id, name) VALUES (?, 'Main') RETURNING id",
         )
         .bind(org)
         .fetch_one(&db)
         .await
         .unwrap();
-        let row = sqlx::query_scalar(
+        let row = db::query_scalar(
             "INSERT INTO statement_transactions (org_id, account_id, txn_id, date, amount, description, currency)
              VALUES (?, ?, 1, '2027-01-01', '-1', 'X', 'ZAR') RETURNING id",
         )
@@ -312,8 +301,8 @@ mod tests {
         (db, org, other, user, row)
     }
 
-    async fn doc(db: &SqlitePool, org: i64, name: &str) -> i64 {
-        sqlx::query_scalar(
+    async fn doc(db: &Db, org: i64, name: &str) -> i64 {
+        db::query_scalar(
             "INSERT INTO documents (org_id, folder, filename, size) VALUES (?, '', ?, 1) RETURNING id",
         )
         .bind(org)
@@ -352,7 +341,7 @@ mod tests {
         assert!(!unlink(&db, other, row, receipt).await.unwrap());
         assert!(unlink(&db, org, row, receipt).await.unwrap());
         assert!(!unlink(&db, org, row, receipt).await.unwrap());
-        let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM documents WHERE id = ?")
+        let kept: i64 = db::query_scalar("SELECT count(*) FROM documents WHERE id = ?")
             .bind(receipt)
             .fetch_one(&db)
             .await
@@ -361,7 +350,7 @@ mod tests {
 
         // Deleting the document's row (e.g. a missing file deleted in Documents) drops the link.
         link(&db, org, row, receipt, user).await.unwrap();
-        sqlx::query("DELETE FROM documents WHERE id = ?")
+        db::query("DELETE FROM documents WHERE id = ?")
             .bind(receipt)
             .execute(&db)
             .await

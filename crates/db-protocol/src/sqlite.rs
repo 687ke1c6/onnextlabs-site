@@ -101,14 +101,15 @@ pub(crate) fn from_sqlx(e: sqlx::Error) -> Error {
         }
         _ => ErrorKind::Internal,
     };
-    let message = match &e {
-        sqlx::Error::Database(d) => d.message().to_owned(),
-        e => e.to_string(),
+    let (message, code) = match &e {
+        sqlx::Error::Database(d) => (d.message().to_owned(), d.code().map(|c| c.into_owned())),
+        e => (e.to_string(), None),
     };
     Error {
         kind,
         message,
         statement: None,
+        code,
     }
 }
 

@@ -3,6 +3,7 @@
 //! - `GET  /health`    — no auth; `{"status": "ok"}` once the database answers.
 //! - `POST /v1/query`  — one statement on its own.
 //! - `POST /v1/batch`  — statements in one transaction (all or nothing).
+//! - `GET  /v1/backup` — a consistent copy of the whole database, as one SQLite file.
 //!
 //! Every `/v1` request needs `Authorization: Bearer <DB_TOKEN>`. The request and response
 //! shapes are in the `db-protocol` crate. Migrations (`/migrations`) run at startup, so a
@@ -51,6 +52,8 @@ struct AppState {
     /// SHA-256 of the token: comparing digests keeps the comparison constant-time whatever
     /// the length of what a client sends.
     token_hash: [u8; 32],
+    /// Where backups are written before they're sent (the data volume, so there's room).
+    scratch_dir: PathBuf,
 }
 
 #[tokio::main]
@@ -72,7 +75,12 @@ async fn main() {
         tracing::error!("database: {e}");
         std::process::exit(1);
     });
-    let app = app(db.clone(), &args.token, args.max_body_mib * 1024 * 1024);
+    let app = app(
+        db.clone(),
+        &args.token,
+        args.max_body_mib * 1024 * 1024,
+        args.data_dir.clone(),
+    );
 
     // [::] takes IPv4 too on Linux, and Railway's private network is IPv6.
     let addr = SocketAddr::from(([0u16; 8], args.port));
@@ -108,14 +116,16 @@ async fn open(dir: &std::path::Path) -> Result<SqlitePool, Box<dyn std::error::E
     Ok(pool)
 }
 
-fn app(db: SqlitePool, token: &str, max_body: usize) -> Router {
+fn app(db: SqlitePool, token: &str, max_body: usize, scratch_dir: PathBuf) -> Router {
     let state = Arc::new(AppState {
         db,
         token_hash: Sha256::digest(token.as_bytes()).into(),
+        scratch_dir,
     });
     let v1 = Router::new()
         .route("/query", post(query))
         .route("/batch", post(batch))
+        .route("/backup", get(backup))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/health", get(health))
@@ -170,16 +180,49 @@ async fn batch(
         .map_err(error_response)
 }
 
+/// `VACUUM INTO` writes a consistent, compacted copy while writes carry on, without the
+/// WAL files a plain file copy would need. The copy is unlinked once open, so it's gone
+/// from disk when the download ends, however it ends.
+async fn backup(State(state): State<Arc<AppState>>) -> Result<Response, Response> {
+    let name = format!(
+        ".backup-{}-{}.db",
+        std::process::id(),
+        BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let path = state.scratch_dir.join(name);
+    let internal = |e: &dyn std::fmt::Display| failure(ErrorKind::Internal, e.to_string());
+    sqlx::query("VACUUM INTO ?")
+        .bind(path.to_string_lossy().into_owned())
+        .execute(&state.db)
+        .await
+        .map_err(|e| internal(&e))?;
+    let file = tokio::fs::File::open(&path).await;
+    let _ = tokio::fs::remove_file(&path).await;
+    let file = file.map_err(|e| internal(&e))?;
+    let len = file.metadata().await.map_err(|e| internal(&e))?.len();
+    tracing::info!(bytes = len, "backup taken");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.sqlite3".to_owned()),
+            (header::CONTENT_LENGTH, len.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{DB_FILE}\""),
+            ),
+        ],
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)),
+    )
+        .into_response())
+}
+
+static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn bad_json(e: JsonRejection) -> Response {
     failure(ErrorKind::BadRequest, e.body_text())
 }
 
 fn failure(kind: ErrorKind, message: String) -> Response {
-    error_response(Error {
-        kind,
-        message,
-        statement: None,
-    })
+    error_response(Error::new(kind, message))
 }
 
 fn error_response(error: Error) -> Response {
@@ -190,7 +233,7 @@ fn error_response(error: Error) -> Response {
         | ErrorKind::CheckViolation => StatusCode::CONFLICT,
         ErrorKind::Sql | ErrorKind::BadRequest => StatusCode::BAD_REQUEST,
         ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
-        ErrorKind::Internal => {
+        ErrorKind::Internal | ErrorKind::Decode => {
             tracing::error!("{error}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
@@ -233,7 +276,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("../../migrations").run(&db).await.unwrap();
-        app(db, TOKEN, 1024 * 1024)
+        app(db, TOKEN, 1024 * 1024, std::env::temp_dir())
     }
 
     async fn call(app: &Router, path: &str, token: Option<&str>, body: &str) -> (StatusCode, Json) {
@@ -327,5 +370,69 @@ mod tests {
             (status, j["error"]["kind"].as_str()),
             (StatusCode::BAD_REQUEST, Some("bad_request"))
         );
+    }
+
+    #[tokio::test]
+    async fn backup_is_a_whole_sqlite_file_and_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("db-server-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = open(&dir.join("data")).await.unwrap();
+        let app = app(db, TOKEN, 1024 * 1024, dir.join("data"));
+        let (status, _) = call(
+            &app,
+            "/v1/query",
+            Some(TOKEN),
+            r#"{"sql": "INSERT INTO organisations (slug, name) VALUES ('kept', 'K')"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let unauthorised = app
+            .clone()
+            .oneshot(Request::get("/v1/backup").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauthorised.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .oneshot(
+                Request::get("/v1/backup")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(bytes.starts_with(b"SQLite format 3\0"));
+
+        // The copy opens as a database with the row in it.
+        let copy = dir.join("copy.db");
+        std::fs::write(&copy, &bytes).unwrap();
+        let db = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&copy))
+            .await
+            .unwrap();
+        let slugs: Vec<String> = sqlx::query_scalar("SELECT slug FROM organisations")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(slugs, ["kept"]);
+        db.close().await;
+
+        let leftovers = std::fs::read_dir(dir.join("data"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".backup-"))
+            .count();
+        assert_eq!(leftovers, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

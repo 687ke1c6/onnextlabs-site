@@ -9,10 +9,10 @@
 //! Read-only: it only counts. The delete itself is an ordinary `DELETE` that the foreign keys
 //! carry out in the same transaction.
 
+use crate::db::{self, Db};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
-use sqlx::{Row, SqliteConnection};
 
 /// One foreign key, from the referencing (child) table's side.
 #[derive(Clone, Debug)]
@@ -77,26 +77,23 @@ fn label(table: &str) -> &'static str {
 }
 
 /// Every foreign key in the database, grouped by the table they reference.
-async fn foreign_keys(db: &mut SqliteConnection) -> sqlx::Result<HashMap<String, Vec<ForeignKey>>> {
-    let tables: Vec<String> = sqlx::query_scalar(
+async fn foreign_keys(db: &Db) -> db::Result<HashMap<String, Vec<ForeignKey>>> {
+    let tables: Vec<String> = db::query_scalar(
         "SELECT name FROM sqlite_master
          WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_sqlx%' ESCAPE '\\'",
     )
-    .fetch_all(&mut *db)
+    .fetch_all(db)
     .await?;
     let mut by_parent: HashMap<String, Vec<ForeignKey>> = HashMap::new();
     for child in tables {
-        let rows = sqlx::query(
+        let rows: Vec<(String, String, Option<String>, String)> = db::query_as(
             "SELECT \"table\", \"from\", \"to\", on_delete FROM pragma_foreign_key_list(?)",
         )
         .bind(&child)
-        .fetch_all(&mut *db)
+        .fetch_all(db)
         .await?;
-        for row in rows {
-            let parent: String = row.try_get("table")?;
-            let from: String = row.try_get("from")?;
-            let to: Option<String> = row.try_get("to")?;
-            let on_delete = match row.try_get::<String, _>("on_delete")?.as_str() {
+        for (parent, from, to, on_delete) in rows {
+            let on_delete = match on_delete.as_str() {
                 "CASCADE" => OnDelete::Delete,
                 "SET NULL" | "SET DEFAULT" => OnDelete::Unlink,
                 _ => OnDelete::Block, // RESTRICT, NO ACTION
@@ -124,12 +121,7 @@ fn placeholders(n: usize) -> String {
 /// Values of `column` in the rows of `table` with these rowids. Table and column names come
 /// from the database's own schema (sqlite_master and its foreign keys), never from a request,
 /// which is why the SQL is built here and marked safe.
-async fn column_of(
-    db: &mut SqliteConnection,
-    table: &str,
-    column: &str,
-    rowids: &[i64],
-) -> sqlx::Result<Vec<i64>> {
+async fn column_of(db: &Db, table: &str, column: &str, rowids: &[i64]) -> db::Result<Vec<i64>> {
     let mut out = Vec::new();
     for chunk in rowids.chunks(500) {
         let sql = format!(
@@ -138,22 +130,22 @@ async fn column_of(
             quote(table),
             placeholders(chunk.len())
         );
-        let mut q = sqlx::query_scalar::<_, Option<i64>>(sqlx::AssertSqlSafe(sql));
+        let mut q = db::query_scalar::<Option<i64>>(db::Trusted(sql));
         for id in chunk {
             q = q.bind(id);
         }
-        out.extend(q.fetch_all(&mut *db).await?.into_iter().flatten());
+        out.extend(q.fetch_all(db).await?.into_iter().flatten());
     }
     Ok(out)
 }
 
 /// Rowids of `table`'s rows whose `column` is one of `values`.
 async fn rows_referencing(
-    db: &mut SqliteConnection,
+    db: &Db,
     table: &str,
     column: &str,
     values: &[i64],
-) -> sqlx::Result<Vec<i64>> {
+) -> db::Result<Vec<i64>> {
     let mut out = Vec::new();
     for chunk in values.chunks(500) {
         let sql = format!(
@@ -162,18 +154,18 @@ async fn rows_referencing(
             quote(column),
             placeholders(chunk.len())
         );
-        let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql));
+        let mut q = db::query_scalar::<i64>(db::Trusted(sql));
         for v in chunk {
             q = q.bind(v);
         }
-        out.extend(q.fetch_all(&mut *db).await?);
+        out.extend(q.fetch_all(db).await?);
     }
     Ok(out)
 }
 
 /// What deleting these rows (by rowid; `id` is the rowid in this schema) would do. `roots`
 /// lists the starting rows per table; they count as deleted.
-pub async fn impact(db: &mut SqliteConnection, roots: &[(&str, Vec<i64>)]) -> sqlx::Result<Impact> {
+pub async fn impact(db: &Db, roots: &[(&str, Vec<i64>)]) -> db::Result<Impact> {
     let fks = foreign_keys(db).await?;
     // Rows already counted, so shared children and cycles are counted once.
     let mut deleted: HashMap<String, HashSet<i64>> = HashMap::new();
@@ -261,24 +253,14 @@ pub async fn impact(db: &mut SqliteConnection, roots: &[(&str, Vec<i64>)]) -> sq
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::SqlitePool;
 
-    async fn db() -> SqlitePool {
-        let db = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
+    async fn db() -> Db {
+        let db = db::test_db().await;
         db
     }
 
-    async fn exec(db: &SqlitePool, sql: &'static str) {
-        sqlx::query(sql).execute(db).await.unwrap();
+    async fn exec(db: &Db, sql: &'static str) {
+        db::query(sql).execute(db).await.unwrap();
     }
 
     fn find<'a>(i: &'a Impact, table: &str, action: OnDelete) -> Option<&'a Effect> {
@@ -321,10 +303,7 @@ mod tests {
         )
         .await;
 
-        let mut conn = db.acquire().await.unwrap();
-        let org = impact(&mut conn, &[("organisations", vec![1])])
-            .await
-            .unwrap();
+        let org = impact(&db, &[("organisations", vec![1])]).await.unwrap();
         let count = |t, a| find(&org, t, a).map(|e| e.count);
         assert_eq!(count("organisations", OnDelete::Delete), Some(1));
         assert_eq!(count("org_members", OnDelete::Delete), Some(1));
@@ -348,7 +327,7 @@ mod tests {
         assert!(!org.blocked);
 
         // A document on its own: the upload keeps existing with its link cleared.
-        let doc = impact(&mut conn, &[("documents", vec![1])]).await.unwrap();
+        let doc = impact(&db, &[("documents", vec![1])]).await.unwrap();
         assert_eq!(
             find(&doc, "statement_uploads", OnDelete::Unlink).map(|e| e.count),
             Some(1)
@@ -359,13 +338,12 @@ mod tests {
         );
 
         // A role someone holds blocks.
-        let role = impact(&mut conn, &[("roles", vec![2])]).await.unwrap();
+        let role = impact(&db, &[("roles", vec![2])]).await.unwrap();
         assert!(role.blocked);
         assert_eq!(
             find(&role, "org_members", OnDelete::Block).map(|e| e.count),
             Some(1)
         );
-        drop(conn);
 
         // And the real delete does what the preview said.
         exec(&db, "DELETE FROM organisations WHERE id = 1").await;
@@ -378,11 +356,10 @@ mod tests {
             ("org_members", 0),
             ("users", 1),
         ] {
-            let n: i64 =
-                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
-                    .fetch_one(&db)
-                    .await
-                    .unwrap();
+            let n: i64 = db::query_scalar(db::Trusted(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&db)
+                .await
+                .unwrap();
             assert_eq!(n, left, "{table}");
         }
     }

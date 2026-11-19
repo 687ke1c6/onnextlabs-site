@@ -6,6 +6,7 @@
 //! Rows are unique per account; type rules belong to an account. Deleting an account deletes
 //! its uploads, rows, rules and row-document links (documents stay), after a preview.
 
+use crate::db::{self, Db};
 use std::sync::Arc;
 
 use axum::{
@@ -16,7 +17,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::{
     api::{bad_request, db_error, error, not_found},
@@ -42,7 +42,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
 }
 
-#[derive(Serialize, sqlx::FromRow, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Account {
     pub id: i64,
     pub name: String,
@@ -50,25 +50,23 @@ pub struct Account {
 }
 
 /// The account, if it's in the org (a 404 otherwise).
-pub async fn find(db: &SqlitePool, org_id: i64, id: i64) -> Result<Account, Response> {
-    sqlx::query_as(
-        "SELECT id, name, identifier FROM statement_accounts WHERE id = ? AND org_id = ?",
-    )
-    .bind(id)
-    .bind(org_id)
-    .fetch_optional(db)
-    .await
-    .map_err(db_error)?
-    .ok_or_else(|| not_found("Account not found."))
+pub async fn find(db: &Db, org_id: i64, id: i64) -> Result<Account, Response> {
+    db::query_as("SELECT id, name, identifier FROM statement_accounts WHERE id = ? AND org_id = ?")
+        .bind(id)
+        .bind(org_id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| not_found("Account not found."))
 }
 
 /// Another account in the org whose identifier is `stated`, if any.
 pub async fn with_identifier(
-    db: &SqlitePool,
+    db: &Db,
     org_id: i64,
     stated: &str,
 ) -> Result<Option<Account>, Response> {
-    sqlx::query_as(
+    db::query_as(
         "SELECT id, name, identifier FROM statement_accounts WHERE org_id = ? AND identifier = ?",
     )
     .bind(org_id)
@@ -78,7 +76,7 @@ pub async fn with_identifier(
     .map_err(db_error)
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 pub struct AccountSummary {
     pub id: i64,
     pub name: String,
@@ -89,8 +87,8 @@ pub struct AccountSummary {
     pub last_uploaded_at: Option<String>,
 }
 
-pub async fn org_accounts(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<AccountSummary>> {
-    sqlx::query_as(
+pub async fn org_accounts(db: &Db, org_id: i64) -> db::Result<Vec<AccountSummary>> {
+    db::query_as(
         "SELECT a.id, a.name, a.identifier,
                 (SELECT count(*) FROM statement_uploads u WHERE u.account_id = a.id) AS uploads,
                 (SELECT count(*) FROM statement_transactions t WHERE t.account_id = a.id) AS rows,
@@ -147,16 +145,13 @@ fn clean(body: &AccountBody) -> Result<(String, Option<String>), Response> {
 }
 
 /// Which uniqueness rule a write broke, as a message.
-fn conflict(e: &sqlx::Error) -> Option<Response> {
-    let sqlx::Error::Database(d) = e else {
-        return None;
-    };
-    if !d.is_unique_violation() {
+fn conflict(e: &db::Error) -> Option<Response> {
+    if !e.is_unique_violation() {
         return None;
     }
     Some(error(
         StatusCode::CONFLICT,
-        if d.message().contains("identifier") {
+        if e.message.contains("identifier") {
             "Another account already has that identifier."
         } else {
             "There's already an account with that name."
@@ -173,7 +168,7 @@ async fn create(
 ) -> Result<(StatusCode, Json<Account>), Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     let (name, identifier) = clean(&body)?;
-    let account: Account = sqlx::query_as(
+    let account: Account = db::query_as(
         "INSERT INTO statement_accounts (org_id, name, identifier) VALUES (?, ?, ?)
          RETURNING id, name, identifier",
     )
@@ -197,7 +192,7 @@ async fn update(
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     find(&state.db, org.id, id).await?;
     let (name, identifier) = clean(&body)?;
-    let account: Account = sqlx::query_as(
+    let account: Account = db::query_as(
         "UPDATE statement_accounts SET name = ?, identifier = ? WHERE id = ?
          RETURNING id, name, identifier",
     )
@@ -219,9 +214,8 @@ async fn delete_preview(
 ) -> Result<Json<delete_impact::Impact>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     find(&state.db, org.id, id).await?;
-    let mut conn = state.db.acquire().await.map_err(db_error)?;
     Ok(Json(
-        delete_impact::impact(&mut conn, &[("statement_accounts", vec![id])])
+        delete_impact::impact(&state.db, &[("statement_accounts", vec![id])])
             .await
             .map_err(db_error)?,
     ))
@@ -246,7 +240,7 @@ async fn remove(
     if body.confirm.trim() != account.name {
         return Err(bad_request("Type the account's name exactly to confirm."));
     }
-    sqlx::query("DELETE FROM statement_accounts WHERE id = ?")
+    db::query("DELETE FROM statement_accounts WHERE id = ?")
         .bind(id)
         .execute(&state.db)
         .await

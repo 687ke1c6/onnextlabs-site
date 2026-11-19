@@ -30,10 +30,14 @@ use openidconnect::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
-use crate::{db, params, subscribe::client_ip, AppState};
+use crate::{
+    db::{self, Db},
+    params,
+    subscribe::client_ip,
+    AppState,
+};
 
 const SESSION_COOKIE: &str = "sid";
 const STATE_COOKIE: &str = "oauth_state";
@@ -403,11 +407,11 @@ async fn exchange(
 
 /// Upserts the user (refreshing profile fields) and creates a session; returns the cookie token.
 async fn start_session(
-    db: &SqlitePool,
+    db: &Db,
     id: &Identity,
     ip: &str,
     user_agent: Option<String>,
-) -> sqlx::Result<String> {
+) -> db::Result<String> {
     let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
     let mut batch = db::Batch::new();
     batch.push(
@@ -448,7 +452,7 @@ async fn start_session(
 /// POST /api/auth/logout
 async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     if let Some(c) = jar.get(SESSION_COOKIE) {
-        let res = sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+        let res = db::query("DELETE FROM sessions WHERE token_hash = ?")
             .bind(hash_token(c.value()))
             .execute(&state.db)
             .await;
@@ -469,9 +473,9 @@ async fn me(user: CurrentUser) -> Json<CurrentUser> {
 }
 
 /// Deletes expired sessions; called periodically.
-pub async fn sweep_sessions(db: &SqlitePool) {
+pub async fn sweep_sessions(db: &Db) {
     let sql = "DELETE FROM sessions WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
-    if let Err(e) = sqlx::query(sql).execute(db).await {
+    if let Err(e) = db::query(sql).execute(db).await {
         tracing::error!(error = %e, "sweeping sessions failed");
     }
 }
@@ -481,19 +485,19 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
 }
 
 /// The signed-in user. As an extractor, rejects with 401 when there's no valid session.
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 pub struct CurrentUser {
     pub id: i64,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing)]
     pub email_verified: bool,
     /// Admins can do everything, in every organisation.
     pub admin: bool,
     /// Why they're an admin: "flag" (set by an admin or `grant-admin`), "admin-emails".
     /// Empty if not.
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     pub admin_via: Vec<&'static str>,
 }
 
@@ -511,7 +515,7 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let unauthorized = || json_error(StatusCode::UNAUTHORIZED, "Not signed in.");
-        let internal = |e: sqlx::Error| {
+        let internal = |e: db::Error| {
             tracing::error!(error = %e, "session lookup failed");
             json_error(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.")
         };
@@ -519,7 +523,7 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         let jar = CookieJar::from_headers(&parts.headers);
         let token = jar.get(SESSION_COOKIE).ok_or_else(unauthorized)?;
 
-        let user: Option<CurrentUser> = sqlx::query_as(
+        let user: Option<CurrentUser> = db::query_as(
             "SELECT u.id, u.email, u.name, u.picture, u.email_verified, u.is_admin AS admin
                  FROM sessions s JOIN users u ON u.id = s.user_id
                  WHERE s.token_hash = ? AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
@@ -606,19 +610,18 @@ mod tests {
             .unwrap();
         assert_ne!(t1, t2);
 
-        let users: Vec<(i64, Option<String>)> = sqlx::query_as("SELECT id, name FROM users")
+        let users: Vec<(i64, Option<String>)> = db::query_as("SELECT id, name FROM users")
             .fetch_all(&db)
             .await
             .unwrap();
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].1.as_deref(), Some("A2"));
         for t in [&t1, &t2] {
-            let owner: i64 =
-                sqlx::query_scalar("SELECT user_id FROM sessions WHERE token_hash = ?")
-                    .bind(hash_token(t))
-                    .fetch_one(&db)
-                    .await
-                    .unwrap();
+            let owner: i64 = db::query_scalar("SELECT user_id FROM sessions WHERE token_hash = ?")
+                .bind(hash_token(t))
+                .fetch_one(&db)
+                .await
+                .unwrap();
             assert_eq!(owner, users[0].0);
         }
     }

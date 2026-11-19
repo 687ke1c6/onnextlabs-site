@@ -13,6 +13,7 @@
 //! uploads, edit type rules (`write-statements`). Saving a copy to Documents also needs
 //! `write-docs`.
 
+use crate::db::Db;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
@@ -30,7 +31,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
 use statements_core::{
     categories::{categorise, CategoryRule},
     hash::DateFormat,
@@ -80,11 +80,11 @@ fn statement_folder(account: &str) -> String {
 
 /// The org's document with exactly this content, if there is one (the oldest).
 async fn document_with_sha256(
-    db: &SqlitePool,
+    db: &Db,
     org_id: i64,
     sha256: &str,
 ) -> Result<Option<ExistingDocument>, Response> {
-    sqlx::query_as(
+    db::query_as(
         "SELECT id, folder, filename FROM documents WHERE org_id = ? AND sha256 = ? ORDER BY id LIMIT 1",
     )
     .bind(org_id)
@@ -94,7 +94,7 @@ async fn document_with_sha256(
     .map_err(db_error)
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct ExistingDocument {
     id: i64,
     folder: String,
@@ -199,7 +199,7 @@ async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadFor
 /// The preview's picks, checked: ids must be rows of this statement, and types must be on the
 /// org's list (stored with the list's spelling).
 async fn read_picks(
-    db: &SqlitePool,
+    db: &Db,
     org_id: i64,
     raw: Option<&str>,
     st: &Statement,
@@ -268,11 +268,7 @@ fn stated_account(statement: &Statement) -> String {
 }
 
 /// The account the upload is for: required, and in this org.
-async fn target_account(
-    db: &SqlitePool,
-    org_id: i64,
-    form: &UploadForm,
-) -> Result<Account, Response> {
+async fn target_account(db: &Db, org_id: i64, form: &UploadForm) -> Result<Account, Response> {
     let id = form
         .account
         .ok_or_else(|| bad_request("Choose the account this statement is for."))?;
@@ -416,10 +412,10 @@ async fn preview(
 
 /// The rows already stored in this account: n8n id -> (type, hand-set).
 async fn stored_types(
-    db: &SqlitePool,
+    db: &Db,
     account_id: i64,
 ) -> Result<HashMap<i32, (Option<String>, bool)>, Response> {
-    let rows: Vec<(i64, Option<String>, bool)> = sqlx::query_as(
+    let rows: Vec<(i64, Option<String>, bool)> = db::query_as(
         "SELECT txn_id, type, type_manual FROM statement_transactions WHERE account_id = ?",
     )
     .bind(account_id)
@@ -502,10 +498,10 @@ async fn save(
 /// Tests: the account whose identifier is `stated` (created if needed; '' = "No account
 /// stated", with no identifier), as the migration does for existing data.
 #[cfg(test)]
-async fn test_account(db: &SqlitePool, org_id: i64, stated: &str) -> i64 {
+async fn test_account(db: &Db, org_id: i64, stated: &str) -> i64 {
     let identifier = Some(stated).filter(|s| !s.is_empty());
     let name = identifier.unwrap_or("No account stated");
-    sqlx::query(
+    db::query(
         "INSERT OR IGNORE INTO statement_accounts (org_id, name, identifier) VALUES (?, ?, ?)",
     )
     .bind(org_id)
@@ -514,7 +510,7 @@ async fn test_account(db: &SqlitePool, org_id: i64, stated: &str) -> i64 {
     .execute(db)
     .await
     .unwrap();
-    sqlx::query_scalar("SELECT id FROM statement_accounts WHERE org_id = ? AND name = ?")
+    db::query_scalar("SELECT id FROM statement_accounts WHERE org_id = ? AND name = ?")
         .bind(org_id)
         .bind(name)
         .fetch_one(db)
@@ -526,14 +522,14 @@ async fn test_account(db: &SqlitePool, org_id: i64, stated: &str) -> i64 {
 /// statement's stated number (created if needed, as the migration did).
 #[cfg(test)]
 async fn store(
-    db: &SqlitePool,
+    db: &Db,
     org: &Org,
     user_id: i64,
     filename: &str,
     sha256: &str,
     st: &Statement,
     document_id: Option<i64>,
-) -> sqlx::Result<i64> {
+) -> db::Result<i64> {
     let account = test_account(db, org.id, &stated_account(st)).await;
     store_with(
         db,
@@ -557,7 +553,7 @@ async fn store(
 /// blank from the rules never replaces a type.
 #[allow(clippy::too_many_arguments)]
 async fn store_with(
-    db: &SqlitePool,
+    db: &Db,
     org: &Org,
     account_id: i64,
     user_id: i64,
@@ -566,7 +562,7 @@ async fn store_with(
     st: &Statement,
     document_id: Option<i64>,
     picks: &Picks,
-) -> sqlx::Result<i64> {
+) -> db::Result<i64> {
     // One batch, decided up front. New/updated counts follow the file: a row whose id was
     // stored before is "updated"; one that wasn't is "new" the first time it appears and
     // "updated" for any repeat. So new = distinct ids not yet stored; updated = the rest.
@@ -663,12 +659,12 @@ async fn store_with(
         .swap_remove(upload)
         .into_first()
         .and_then(|v| v.as_i64())
-        .ok_or(sqlx::Error::RowNotFound)
+        .ok_or_else(|| db::Error::new(db_protocol::ErrorKind::Decode, "no upload id returned"))
 }
 
 // ---- listing, viewing, deleting ----
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 pub struct UploadSummary {
     pub id: i64,
     pub format: String,
@@ -712,7 +708,7 @@ macro_rules! select_upload {
 }
 
 /// A stored row, as linked to an upload.
-#[derive(Serialize, sqlx::FromRow, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct StoredTransaction {
     pub txn_id: i64,
     pub date: String,
@@ -720,7 +716,6 @@ pub struct StoredTransaction {
     pub description: String,
     pub currency: String,
     #[serde(rename = "type")]
-    #[sqlx(rename = "type")]
     pub category: Option<String>,
 }
 
@@ -746,7 +741,7 @@ async fn list(
     Query(q): Query<AccountQuery>,
 ) -> Result<Json<Vec<UploadSummary>>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
-    let uploads = sqlx::query_as(select_upload!(
+    let uploads = db::query_as(select_upload!(
         "WHERE u.org_id = ?1 AND (?2 IS NULL OR u.account_id = ?2)
          ORDER BY u.uploaded_at DESC, u.id DESC"
     ))
@@ -768,19 +763,15 @@ async fn show(
     Ok(Json(upload_detail(&state.db, org.id, id).await?))
 }
 
-pub async fn upload_detail(
-    db: &SqlitePool,
-    org_id: i64,
-    id: i64,
-) -> Result<UploadDetail, Response> {
-    let upload: UploadSummary = sqlx::query_as(select_upload!("WHERE u.id = ? AND u.org_id = ?"))
+pub async fn upload_detail(db: &Db, org_id: i64, id: i64) -> Result<UploadDetail, Response> {
+    let upload: UploadSummary = db::query_as(select_upload!("WHERE u.id = ? AND u.org_id = ?"))
         .bind(id)
         .bind(org_id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Statement not found."))?;
-    let transactions = sqlx::query_as(
+    let transactions = db::query_as(
         "SELECT t.txn_id, t.date, t.amount, t.description, t.currency, t.type
          FROM statement_upload_transactions l
          JOIN statement_transactions t ON t.id = l.transaction_id
@@ -799,7 +790,7 @@ pub async fn upload_detail(
 }
 
 /// A stored row with where it came from, for the org-wide transactions grid.
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct OrgTransaction {
     /// The row's own id (for editing it); `txn_id` is the n8n id.
     id: i64,
@@ -807,13 +798,12 @@ struct OrgTransaction {
     account_id: i64,
     date: String,
     /// e.g. "Aug 2024", derived from `date` exactly as the sheet's `month` column is.
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     month: String,
     amount: String,
     description: String,
     currency: String,
     #[serde(rename = "type")]
-    #[sqlx(rename = "type")]
     category: Option<String>,
     /// The type was picked by hand: saving a statement won't change it.
     type_manual: bool,
@@ -842,11 +832,11 @@ async fn all_transactions(
 }
 
 async fn org_transactions(
-    db: &SqlitePool,
+    db: &Db,
     org_id: i64,
     account: Option<i64>,
-) -> sqlx::Result<Vec<OrgTransaction>> {
-    sqlx::query_as(
+) -> db::Result<Vec<OrgTransaction>> {
+    db::query_as(
         "SELECT t.id, t.txn_id, t.account_id, t.date, t.amount, t.description, t.currency, t.type,
                 t.type_manual,
                 (SELECT count(*) FROM statement_transaction_documents d WHERE d.transaction_id = t.id)
@@ -891,8 +881,8 @@ async fn remove(
 
 /// The rows of an upload that no other saved statement contains: deleting the upload deletes
 /// these. (Rows another statement also contains stay, or that statement would lose them.)
-async fn rows_only_in(db: &mut sqlx::SqliteConnection, upload_id: i64) -> sqlx::Result<Vec<i64>> {
-    sqlx::query_scalar(
+async fn rows_only_in(db: &Db, upload_id: i64) -> db::Result<Vec<i64>> {
+    db::query_scalar(
         "SELECT l.transaction_id FROM statement_upload_transactions l
          WHERE l.upload_id = ?1 AND NOT EXISTS (
              SELECT 1 FROM statement_upload_transactions o
@@ -919,17 +909,15 @@ async fn delete_preview(
 ) -> Result<Json<UploadDeletePreview>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     upload_detail(&state.db, org.id, id).await?; // 404 unless it's this org's
-    let mut conn = state.db.acquire().await.map_err(db_error)?;
-    let only_here = rows_only_in(&mut conn, id).await.map_err(db_error)?;
-    let linked: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM statement_upload_transactions WHERE upload_id = ?",
-    )
-    .bind(id)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(db_error)?;
+    let only_here = rows_only_in(&state.db, id).await.map_err(db_error)?;
+    let linked: i64 =
+        db::query_scalar("SELECT count(*) FROM statement_upload_transactions WHERE upload_id = ?")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(db_error)?;
     let impact = crate::delete_impact::impact(
-        &mut conn,
+        &state.db,
         &[
             ("statement_uploads", vec![id]),
             ("statement_transactions", only_here.clone()),
@@ -946,7 +934,7 @@ async fn delete_preview(
 /// `None` if there's no such upload in the org; otherwise how many rows were deleted with it.
 /// Deletes the upload, its rows that no other statement contains, and (by cascade) their
 /// links and attached-document links. Documents themselves stay.
-async fn delete_upload(db: &SqlitePool, org_id: i64, id: i64) -> sqlx::Result<Option<u64>> {
+async fn delete_upload(db: &Db, org_id: i64, id: i64) -> db::Result<Option<u64>> {
     // One batch: first the rows only this upload contains (their links and attached-document
     // links go by cascade), then the upload and its remaining links. With no such upload in
     // the org, neither statement matches anything.
@@ -1025,17 +1013,17 @@ fn validate_rules(rules: &[RuleJson]) -> Result<Vec<CategoryRule>, Response> {
         .collect()
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Deserialize)]
 struct RuleRow {
-    #[sqlx(rename = "type")]
+    #[serde(rename = "type")]
     category: String,
     contains: String,
     min_amount: Option<f64>,
     max_amount: Option<f64>,
 }
 
-async fn load_rules(db: &SqlitePool, account_id: i64) -> Result<Vec<RuleJson>, Response> {
-    let rows: Vec<RuleRow> = sqlx::query_as(
+async fn load_rules(db: &Db, account_id: i64) -> Result<Vec<RuleJson>, Response> {
+    let rows: Vec<RuleRow> = db::query_as(
         "SELECT type, contains, min_amount, max_amount FROM statement_type_rules
          WHERE account_id = ? ORDER BY position, id",
     )
@@ -1056,10 +1044,7 @@ async fn load_rules(db: &SqlitePool, account_id: i64) -> Result<Vec<RuleJson>, R
 
 /// The account's rules, ready to apply. Stored rules were checked when saved; any that no
 /// longer pass are skipped.
-pub async fn account_rules(
-    db: &SqlitePool,
-    account_id: i64,
-) -> Result<Vec<CategoryRule>, Response> {
+pub async fn account_rules(db: &Db, account_id: i64) -> Result<Vec<CategoryRule>, Response> {
     Ok(load_rules(db, account_id)
         .await?
         .iter()
@@ -1141,9 +1126,7 @@ async fn put_rules(
             ],
         );
     }
-    db::run(&state.db, batch)
-        .await
-        .map_err(|e| db_error(e.into()))?;
+    db::run(&state.db, batch).await.map_err(db_error)?;
     tracing::info!(org = %org.slug, account = account_id, rules = body.rules.len(), user = user.id, "type rules saved");
     Ok(Json(RulesResponse {
         rules: load_rules(&state.db, account_id).await?,
@@ -1275,24 +1258,15 @@ mod tests {
     }
 
     /// A fresh in-memory database with every migration, one org and one user.
-    async fn test_db() -> (SqlitePool, Org, i64) {
-        let db = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
-        let org_id: i64 = sqlx::query_scalar(
+    async fn test_db() -> (Db, Org, i64) {
+        let db = db::test_db().await;
+        let org_id: i64 = db::query_scalar(
             "INSERT INTO organisations (slug, name) VALUES ('acme', 'Acme') RETURNING id",
         )
         .fetch_one(&db)
         .await
         .unwrap();
-        let user_id: i64 = sqlx::query_scalar(
+        let user_id: i64 = db::query_scalar(
             "INSERT INTO users (issuer, subject) VALUES ('test', '1') RETURNING id",
         )
         .fetch_one(&db)
@@ -1313,8 +1287,8 @@ mod tests {
         parse_statement(SYNTHETIC, &validate_rules(rules).unwrap()).unwrap()
     }
 
-    async fn count(db: &SqlitePool, sql: &'static str) -> i64 {
-        sqlx::query_scalar(sql).fetch_one(db).await.unwrap()
+    async fn count(db: &Db, sql: &'static str) -> i64 {
+        db::query_scalar(sql).fetch_one(db).await.unwrap()
     }
 
     #[tokio::test]
@@ -1538,7 +1512,7 @@ mod tests {
         store(&db, &org, user, "b.csv", "x", &other_account, None)
             .await
             .unwrap();
-        let other_org_id: i64 = sqlx::query_scalar(
+        let other_org_id: i64 = db::query_scalar(
             "INSERT INTO organisations (slug, name) VALUES ('other', 'Other') RETURNING id",
         )
         .fetch_one(&db)

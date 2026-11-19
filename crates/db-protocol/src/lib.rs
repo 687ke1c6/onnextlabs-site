@@ -21,6 +21,9 @@ use base64::Engine;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+mod decode;
+pub use decode::{from_row, from_value};
+
 #[cfg(feature = "sqlite")]
 mod sqlite;
 #[cfg(feature = "sqlite")]
@@ -95,6 +98,31 @@ impl From<Vec<u8>> for Value {
         Value::Blob(v)
     }
 }
+impl From<&i64> for Value {
+    fn from(v: &i64) -> Self {
+        Value::Integer(*v)
+    }
+}
+impl From<&[u8]> for Value {
+    fn from(v: &[u8]) -> Self {
+        Value::Blob(v.to_vec())
+    }
+}
+impl From<&Vec<u8>> for Value {
+    fn from(v: &Vec<u8>) -> Self {
+        Value::Blob(v.clone())
+    }
+}
+macro_rules! from_option_ref {
+    ($($t:ty),*) => {$(
+        impl From<&Option<$t>> for Value {
+            fn from(v: &Option<$t>) -> Self {
+                v.clone().into()
+            }
+        }
+    )*};
+}
+from_option_ref!(String, i64, f64, bool, Vec<u8>);
 impl<T: Into<Value>> From<Option<T>> for Value {
     fn from(v: Option<T>) -> Self {
         v.map_or(Value::Null, Into::into)
@@ -248,6 +276,18 @@ impl StmtResult {
             .next()
             .and_then(|r| r.into_iter().next())
     }
+    pub fn rows_affected(&self) -> u64 {
+        self.rows_affected
+    }
+
+    /// Each row as `T` (see [`from_row`]).
+    pub fn decode<T: serde::de::DeserializeOwned>(self) -> Result<Vec<T>, Error> {
+        let columns = self.columns;
+        self.rows
+            .into_iter()
+            .map(|r| from_row(&columns, r))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -269,8 +309,11 @@ pub enum ErrorKind {
     /// The request itself is malformed.
     BadRequest,
     Unauthorized,
-    /// The service failed (I/O, pool, ...); worth retrying.
+    /// The service failed (I/O, pool, ...), or couldn't be reached.
     Internal,
+    /// Client side: a result didn't have the shape the caller asked for (a column of the
+    /// wrong type, no row where one was required).
+    Decode,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -280,6 +323,28 @@ pub struct Error {
     /// In a batch, the index of the statement that failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<usize>,
+    /// SQLite's extended result code, when SQLite raised it (e.g. "2067" for UNIQUE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+impl Error {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Error {
+            kind,
+            message: message.into(),
+            statement: None,
+            code: None,
+        }
+    }
+
+    pub fn is_unique_violation(&self) -> bool {
+        self.kind == ErrorKind::UniqueViolation
+    }
+
+    pub fn is_foreign_key_violation(&self) -> bool {
+        self.kind == ErrorKind::ForeignKeyViolation
+    }
 }
 
 impl fmt::Display for Error {

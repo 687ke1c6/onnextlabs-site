@@ -195,9 +195,13 @@ it's on whenever sign-in is. In Google Cloud console:
 
 ## Database service
 `crates/db-server` puts the SQLite database behind HTTP, so the data can live on its own host.
-**The site doesn't use it yet**; it still opens `DATA_DIR/onnextlabs.db` itself.
+The site uses it when `DB_URL` (and `DB_TOKEN`) are set; otherwise it opens
+`DATA_DIR/onnextlabs.db` itself, as in dev and the tests. Both ways run the same code
+(`crates/db-protocol`), so they behave the same.
 
 - `GET /health`: no auth.
+- `GET /v1/backup`: a consistent copy of the whole database as one SQLite file, taken while
+  it runs (`VACUUM INTO`). `just db-backup` saves one to `backups/`.
 - `POST /v1/query`: `{"sql": "...", "args": [...]}`, one statement on its own; answers
   `{"columns": [...], "rows": [[...]], "rows_affected": n, "last_insert_id": n}`.
 - `POST /v1/batch`: `{"statements": [{"sql", "args"}, ...]}`, run in one transaction (all or
@@ -213,8 +217,10 @@ subquery. The service runs the migrations in `migrations/` at startup, so a sche
 must also work with the site version that's already running (add a column, use it later).
 
 ```sh
-just db   # on :3100 against ./data, token from DB_TOKEN (default: dev-db-token-0123456789)
+just db          # on :3100 against ./data, token from DB_TOKEN (default: dev-db-token-0123456789)
+just db-backup   # a consistent copy into backups/ (DB_URL, default http://127.0.0.1:3100)
 ```
+To run the site against it, set `DB_URL=http://127.0.0.1:3100` (and `DB_TOKEN`) in `.env`.
 
 | Variable       | Meaning                                                   |
 | -------------- | --------------------------------------------------------- |
@@ -228,6 +234,8 @@ One repo, two services. Add a service from this repo with:
 - variable `RAILWAY_DOCKERFILE_PATH=/crates/db-server/Dockerfile`, `DB_TOKEN`;
 - a volume mounted at `/app/data` (the database moves here from the site's volume);
 - healthcheck path `/health`, no public domain (private network only);
+- on the site: `DB_URL=http://${{<db service>.RAILWAY_PRIVATE_DOMAIN}}:3100` and the same
+  `DB_TOKEN`. The site then needs no volume;
 - watch paths `/crates/db-server/**`, `/crates/db-protocol/**`, `/migrations/**`,
   `/Cargo.lock`, so site-only changes don't redeploy it. Give the site the opposite
   (`/web/**`, `/crates/site/**`, `/crates/statements-core/**`, `/crates/db-protocol/**`,

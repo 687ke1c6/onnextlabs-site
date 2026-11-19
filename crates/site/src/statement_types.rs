@@ -7,6 +7,7 @@
 //! A type someone picks on a row is hand-set (`type_manual`): saving a statement never changes
 //! it. Clearing it makes the row blank and not hand-set, so the next save can type it again.
 
+use crate::db::Db;
 use std::sync::Arc;
 
 use axum::{
@@ -17,7 +18,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::{
     api::{bad_request, db_error, error, not_found},
@@ -42,7 +42,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 pub struct TypeInfo {
     id: i64,
     name: String,
@@ -51,8 +51,8 @@ pub struct TypeInfo {
     rules: i64,
 }
 
-pub async fn org_types(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<TypeInfo>> {
-    sqlx::query_as(
+pub async fn org_types(db: &Db, org_id: i64) -> db::Result<Vec<TypeInfo>> {
+    db::query_as(
         "SELECT s.id, s.name,
                 (SELECT count(*) FROM statement_transactions t
                  WHERE t.org_id = s.org_id AND t.type = s.name) AS rows,
@@ -66,12 +66,8 @@ pub async fn org_types(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<TypeInf
 }
 
 /// The list's own spelling of `name` (matched ignoring case), if it's on the list.
-pub async fn canonical_name(
-    db: &SqlitePool,
-    org_id: i64,
-    name: &str,
-) -> sqlx::Result<Option<String>> {
-    sqlx::query_scalar("SELECT name FROM statement_types WHERE org_id = ? AND name = ?")
+pub async fn canonical_name(db: &Db, org_id: i64, name: &str) -> db::Result<Option<String>> {
+    db::query_scalar("SELECT name FROM statement_types WHERE org_id = ? AND name = ?")
         .bind(org_id)
         .bind(name.trim())
         .fetch_optional(db)
@@ -120,7 +116,7 @@ async fn create_type(
 ) -> Result<(StatusCode, Json<Vec<TypeInfo>>), Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     let name = clean_name(&body.name)?;
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM statement_types WHERE org_id = ?")
+    let count: i64 = db::query_scalar("SELECT count(*) FROM statement_types WHERE org_id = ?")
         .bind(org.id)
         .fetch_one(&state.db)
         .await
@@ -128,14 +124,14 @@ async fn create_type(
     if count >= MAX_TYPES {
         return Err(bad_request("At most 500 types."));
     }
-    match sqlx::query("INSERT INTO statement_types (org_id, name) VALUES (?, ?)")
+    match db::query("INSERT INTO statement_types (org_id, name) VALUES (?, ?)")
         .bind(org.id)
         .bind(&name)
         .execute(&state.db)
         .await
     {
         Ok(_) => {}
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => return Err(taken()),
+        Err(e) if e.is_unique_violation() => return Err(taken()),
         Err(e) => return Err(db_error(e)),
     }
     tracing::info!(org = %org.slug, %name, user = user.id, "statement type added");
@@ -160,14 +156,14 @@ async fn rename_type(
             tracing::info!(org = %org.slug, from = %old, to = %name, user = user.id, "statement type renamed")
         }
         Ok(None) => return Err(not_found("Type not found.")),
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => return Err(taken()),
+        Err(e) if e.is_unique_violation() => return Err(taken()),
         Err(e) => return Err(db_error(e)),
     }
     Ok(Json(org_types(&state.db, org.id).await.map_err(db_error)?))
 }
 
 /// The old name, or None if there's no such type in the org.
-async fn rename(db: &SqlitePool, org_id: i64, id: i64, name: &str) -> sqlx::Result<Option<String>> {
+async fn rename(db: &Db, org_id: i64, id: i64, name: &str) -> db::Result<Option<String>> {
     // One batch: rows and rules move to the new name first (matching the old name by
     // subquery), then the type itself. With no such type, nothing matches and nothing changes.
     let mut batch = db::Batch::new();
@@ -233,7 +229,7 @@ async fn delete_type(
             ),
         ));
     }
-    sqlx::query("DELETE FROM statement_types WHERE id = ?")
+    db::query("DELETE FROM statement_types WHERE id = ?")
         .bind(id)
         .execute(&state.db)
         .await
@@ -296,12 +292,12 @@ pub async fn set_row_type(
 
 /// Picking a type marks the row hand-set; clearing it doesn't (the next save may type it).
 pub async fn set_type(
-    db: &SqlitePool,
+    db: &Db,
     org_id: i64,
     row_id: i64,
     category: Option<&str>,
-) -> sqlx::Result<bool> {
-    Ok(sqlx::query(
+) -> db::Result<bool> {
+    Ok(db::query(
         "UPDATE statement_transactions
          SET type = ?1, type_manual = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?3 AND org_id = ?4",
@@ -328,12 +324,12 @@ mod tests {
         assert!(clean_name("A\u{7}B").is_err());
     }
 
-    async fn exec(db: &SqlitePool, sql: &'static str) {
-        sqlx::query(sql).execute(db).await.unwrap();
+    async fn exec(db: &Db, sql: &'static str) {
+        db::query(sql).execute(db).await.unwrap();
     }
 
-    async fn types_in_use(db: &SqlitePool) -> Vec<(String, String)> {
-        sqlx::query_as(
+    async fn types_in_use(db: &Db) -> Vec<(String, String)> {
+        db::query_as(
             "SELECT 'row', type FROM statement_transactions WHERE type IS NOT NULL
              UNION ALL SELECT 'rule', type FROM statement_type_rules ORDER BY 1, 2",
         )
@@ -389,7 +385,7 @@ mod tests {
         // Another org's id, or none at all: nothing found, nothing changed.
         assert_eq!(rename(&db, 1, 2, "Other").await.unwrap(), None);
         assert_eq!(rename(&db, 1, 99, "Other").await.unwrap(), None);
-        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM statement_types ORDER BY id")
+        let names: Vec<String> = db::query_scalar("SELECT name FROM statement_types ORDER BY id")
             .fetch_all(&db)
             .await
             .unwrap();
@@ -402,7 +398,7 @@ mod tests {
         )
         .await;
         let err = rename(&db, 1, 1, "bank").await.unwrap_err();
-        assert!(matches!(err, sqlx::Error::Database(ref d) if d.is_unique_violation()));
+        assert!(err.is_unique_violation());
         assert_eq!(
             types_in_use(&db).await,
             pairs(&[

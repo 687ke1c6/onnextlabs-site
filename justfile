@@ -4,6 +4,8 @@ image := "onnextlabs-site"
 port := env("PORT", "3000")
 files_user := env("FILES_USER", "dev")
 files_password := env("FILES_PASSWORD", "dev")
+db_token := env("DB_TOKEN", "dev-db-token-0123456789")
+export DB_TOKEN := db_token
 
 # list recipes
 default:
@@ -37,9 +39,16 @@ files:
     mkdir -p data-dav
     RCLONE_USER={{quote(files_user)}} RCLONE_PASS={{quote(files_password)}} rclone serve webdav data-dav --addr 127.0.0.1:8090 --dir-cache-time 5s
 
-# run the database service on :3100 against ./data (the site doesn't use it yet)
+# run the database service on :3100 against ./data (the site uses it when DB_URL is set)
 db:
-    DB_TOKEN={{quote(env("DB_TOKEN", "dev-db-token-0123456789"))}} PORT=3100 cargo run -p db-server
+    DB_TOKEN={{quote(db_token)}} PORT=3100 cargo run -p db-server
+
+# download a consistent backup from the database service into ./backups (DB_URL, DB_TOKEN)
+db-backup:
+    mkdir -p backups
+    curl -fsS -H "Authorization: Bearer $DB_TOKEN" "${DB_URL:-http://127.0.0.1:3100}/v1/backup" \
+        -o "backups/onnextlabs-$(date -u +%Y%m%dT%H%M%SZ).db"
+    @ls -t backups | head -1
 
 # run only the vite dev server
 web:

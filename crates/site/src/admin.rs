@@ -1,5 +1,6 @@
 //! Admin-only API. Every handler takes `Admin`, which rejects anyone who isn't one.
 
+use crate::db::{self, Db};
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{
@@ -11,7 +12,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
 
 use crate::{
     api::{bad_request, db_error, not_found},
@@ -31,7 +31,7 @@ async fn overview(
     _admin: Admin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let (subscribers, users): (i64, i64) = sqlx::query_as(
+    let (subscribers, users): (i64, i64) = db::query_as(
         "SELECT (SELECT count(*) FROM subscribers WHERE unsubscribed_at IS NULL),
                 (SELECT count(*) FROM users)",
     )
@@ -52,7 +52,7 @@ struct Membership {
 }
 
 /// An account as the Users page shows it.
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct AdminUser {
     id: i64,
     email: Option<String>,
@@ -62,12 +62,12 @@ struct AdminUser {
     last_login_at: String,
     /// The stored flag (set in the portal or with `grant-admin`).
     is_admin: bool,
-    #[serde(skip)]
+    #[serde(skip_serializing)]
     email_verified: bool,
     /// Admin because of ADMIN_EMAILS: can't be removed here.
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     env_admin: bool,
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     orgs: Vec<Membership>,
 }
 
@@ -83,7 +83,7 @@ macro_rules! select_user {
 
 /// Fills in `env_admin` and each user's org memberships.
 async fn complete(state: &AppState, mut users: Vec<AdminUser>) -> Result<Vec<AdminUser>, Response> {
-    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+    let rows: Vec<(i64, String, String, String)> = db::query_as(
         "SELECT m.user_id, o.slug, o.name, r.name
          FROM org_members m
          JOIN organisations o ON o.id = m.org_id
@@ -114,7 +114,7 @@ async fn users(
     _admin: Admin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<AdminUser>>, Response> {
-    let users = sqlx::query_as(select_user!(
+    let users = db::query_as(select_user!(
         "ORDER BY coalesce(name, email) COLLATE NOCASE"
     ))
     .fetch_all(&state.db)
@@ -123,8 +123,8 @@ async fn users(
     complete(&state, users).await.map(Json)
 }
 
-async fn fetch_user(db: &SqlitePool, id: i64) -> Result<AdminUser, Response> {
-    sqlx::query_as(select_user!("WHERE id = ?"))
+async fn fetch_user(db: &Db, id: i64) -> Result<AdminUser, Response> {
+    db::query_as(select_user!("WHERE id = ?"))
         .bind(id)
         .fetch_optional(db)
         .await
@@ -151,7 +151,7 @@ async fn set_admin(
         ));
     }
     fetch_user(&state.db, id).await?;
-    sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?")
+    db::query("UPDATE users SET is_admin = ? WHERE id = ?")
         .bind(body.admin)
         .bind(id)
         .execute(&state.db)

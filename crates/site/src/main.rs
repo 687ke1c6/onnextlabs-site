@@ -32,9 +32,9 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, Subcommand};
+use db::Db;
 use rate_limit::{Limit, RateLimiter};
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
 use tokio::signal;
 use tower_http::{
     compression::{predicate::Predicate, CompressionLayer, DefaultPredicate},
@@ -53,9 +53,19 @@ struct Args {
     #[arg(long, env = "STATIC_DIR", default_value = "web/dist")]
     static_dir: PathBuf,
 
-    /// Directory for the SQLite database. Created if missing. Mount persistent storage here.
+    /// Directory for the SQLite database when there's no `DB_URL`. Created if missing.
+    /// Mount persistent storage here.
     #[arg(long, env = "DATA_DIR", default_value = "data")]
     data_dir: PathBuf,
+
+    /// The database service (crates/db-server), e.g. `http://db.railway.internal:3100`.
+    /// When set, the site uses it instead of a local database file.
+    #[arg(long, env = "DB_URL")]
+    db_url: Option<String>,
+
+    /// The database service's bearer token (with `DB_URL`).
+    #[arg(long, env = "DB_TOKEN", hide_env_values = true)]
+    db_token: Option<String>,
 
     /// Largest document upload allowed, in megabytes.
     #[arg(long, env = "MAX_UPLOAD_MB", default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=10_240))]
@@ -139,7 +149,7 @@ enum Command {
 }
 
 pub struct AppState {
-    db: SqlitePool,
+    db: Db,
     auth: auth::Auth,
     altcha: altcha::Altcha,
     /// Where org files live (see `storage`).
@@ -163,7 +173,12 @@ async fn main() {
     let args = Args::parse();
     let static_dir = args.static_dir;
 
-    let db = db::open(&args.data_dir).await.unwrap_or_else(|e| {
+    let db = match (&args.db_url, &args.db_token) {
+        (Some(url), Some(token)) => Db::remote(url, token).await,
+        (Some(_), None) => Err("DB_URL is set but DB_TOKEN isn't".into()),
+        (None, _) => Db::open_local(&args.data_dir).await,
+    };
+    let db = db.unwrap_or_else(|e| {
         tracing::error!("database: {e}");
         std::process::exit(1);
     });
