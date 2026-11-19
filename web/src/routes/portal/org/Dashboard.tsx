@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 import { Link } from "@tanstack/solid-router";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import FileText from "lucide-solid/icons/file-text";
+import Landmark from "lucide-solid/icons/landmark";
 import { can } from "~/lib/orgs";
 import { PageHeader, usePortalUser } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
@@ -23,8 +24,8 @@ export function OrgDashboardPage() {
         </p>
       </section>
 
-      <Show when={can(org, "read-docs")}>
-        <section class="mt-4 grid gap-3 sm:grid-cols-2">
+      <section class="mt-4 grid gap-3 sm:grid-cols-2">
+        <Show when={can(org, "read-docs")}>
           <Link
             to="/portal/$org/documents"
             params={{ org: org.slug }}
@@ -37,8 +38,22 @@ export function OrgDashboardPage() {
             </div>
             <ChevronRight size={16} class="shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
           </Link>
-        </section>
-      </Show>
+        </Show>
+        <Show when={can(org, "read-statements")}>
+          <Link
+            to="/portal/$org/statements"
+            params={{ org: org.slug }}
+            class="group flex items-center gap-3 rounded-xl border border-border p-4 transition-colors hover:border-ring hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Landmark size={20} class="shrink-0 text-muted-foreground" />
+            <div class="min-w-0 flex-1">
+              <p class="text-sm font-medium">Statements</p>
+              <p class="text-xs text-muted-foreground">Bank statements and their transactions</p>
+            </div>
+            <ChevronRight size={16} class="shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        </Show>
+      </section>
     </>
   );
 }

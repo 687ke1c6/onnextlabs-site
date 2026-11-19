@@ -333,6 +333,52 @@ async fn upload(
     Err(bad_request("No file was sent."))
 }
 
+/// Saves a file already in memory as a document in `folder` (created if new), numbering the
+/// name if it's taken, exactly like an upload. The caller checks `write-docs`. Returns the
+/// document's id and its final name.
+pub async fn save_bytes(
+    state: &AppState,
+    org: &Org,
+    user_id: i64,
+    folder: &str,
+    filename: &str,
+    content_type: Option<String>,
+    bytes: axum::body::Bytes,
+) -> Result<(i64, String, String), Response> {
+    let folder = parse_folder(folder).map_err(bad_request)?;
+    let filename = upload_name(filename).map_err(bad_request)?;
+    let dir = folder_path(org, &folder)?;
+    state.storage.make_dirs(&dir).await.map_err(storage_error)?;
+    let source = futures_util::stream::iter([Ok::<_, std::convert::Infallible>(bytes)]);
+    let uploaded = state
+        .storage
+        .upload(&dir, &filename, source, state.max_upload_bytes)
+        .await
+        .map_err(|e| match e {
+            UploadError::TooLarge => too_large(state.max_upload_bytes),
+            UploadError::Empty => bad_request("The file is empty."),
+            UploadError::Source(never) => match never {},
+            UploadError::Storage(e) => storage_error(e),
+        })?;
+    let stored = store(
+        state,
+        org,
+        user_id,
+        &folder,
+        &dir,
+        &filename,
+        content_type,
+        &uploaded,
+    )
+    .await;
+    if stored.is_err() {
+        let _ = state.storage.delete(&uploaded.temp).await;
+    }
+    let doc = stored?;
+    tracing::info!(id = doc.id, org = %org.slug, folder = %doc.folder, filename = %doc.filename, size = doc.size, user = user_id, "document saved");
+    Ok((doc.id, doc.folder, doc.filename))
+}
+
 /// Claims a free name in the folder (row first, so concurrent uploads can't collide),
 /// then moves the uploaded file to it. A name taken in storage but not in the database
 /// (a file put there by hand) is skipped too.

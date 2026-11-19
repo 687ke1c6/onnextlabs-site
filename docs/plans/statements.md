@@ -140,7 +140,18 @@ dependencies). Notes:
 - Add `ReadStatements` and `WriteStatements` to `src/rbac.rs`, and update the
   permission table in the README.
 
-## Step 2: Upload, preview, save
+## Step 2: Upload, preview, save ✅
+
+Done as below. Checked against a real server and rclone with a scratch copy of the dev
+database: permissions, preview, save, re-save (updates, never duplicates), Save to
+Documents, delete. The pages weren't clicked through in a browser here (none in the
+devcontainer). Notes:
+- The upload's `account_number` is `''` rather than NULL when the file doesn't state one,
+  matching the transactions.
+- `documents::save_bytes` stores a file that's already in memory through the same path as
+  an upload, so it gets the same numbering and cleanup.
+- The org nav and dashboard get a Statements entry (`read-statements`).
+
 
 - `POST /api/orgs/{slug}/statements/preview` (multipart): parse, apply the rules, and
   return format, account number, row count, how many rows got a type, the first rows,
@@ -155,7 +166,11 @@ dependencies). Notes:
 - Frontend: a Statements entry in the org nav, and the page with the dropzone, preview,
   options and Save, then the uploads list and the upload detail page.
 
-## Step 3: Type rules screen
+## Step 3: Type rules screen ✅
+
+Done as below. "Contains" is edited one text per line, and lines are kept as typed apart
+from dropping blank ones. Each rule can be limited to one format, or left on "any".
+
 
 - `/portal/<org>/statements/rules`: list, add, edit, delete and reorder rules. A "test
   against a description and amount" box shows which rule matches.

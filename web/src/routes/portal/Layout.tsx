@@ -2,6 +2,7 @@ import { createContext, createResource, createSignal, For, type JSX, Match, Show
 import { Link, Outlet, useLocation, useNavigate, useParams } from "@tanstack/solid-router";
 import Building2 from "lucide-solid/icons/building";
 import FileText from "lucide-solid/icons/file-text";
+import Landmark from "lucide-solid/icons/landmark";
 import LayoutDashboard from "lucide-solid/icons/layout-dashboard";
 import Check from "lucide-solid/icons/check";
 import ChevronRight from "lucide-solid/icons/chevron-right";
@@ -193,6 +194,19 @@ function Rail(props: { user: User; orgs: Org[]; onSignOut: () => void }) {
                 >
                   <FileText size={18} class="shrink-0" />
                   <span class={label()}>Documents</span>
+                </Link>
+              </Show>
+              <Show when={can(o, "read-statements")}>
+                <Link
+                  to="/portal/$org/statements"
+                  params={{ org: o.slug }}
+                  title={tip("Statements")}
+                  class={item()}
+                  activeProps={ACTIVE}
+                  inactiveProps={INACTIVE}
+                >
+                  <Landmark size={18} class="shrink-0" />
+                  <span class={label()}>Statements</span>
                 </Link>
               </Show>
             </>

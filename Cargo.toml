@@ -30,6 +30,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 quick-xml = "0.37"
 percent-encoding = "2.3.2"
+statements-core = { path = "crates/statements-core" }
 
 [profile.release]
 lto = true
