@@ -208,3 +208,18 @@ URI in the sign-in steps and `.env.example`, and the POC spec in
 - README section for Statements, and the POC spec kept as `docs/statements-iq-spec.md`
   for history.
 - Remove the `statements-iq/` mount from the devcontainer (yours to do; never committed).
+
+## Step 6: Transactions grid ✅
+
+Added after the first review: the section now opens on **Transactions**, every stored row
+in the org (`GET /api/orgs/{slug}/statement-transactions`, `read-statements`), shown with
+TanStack Table (`@tanstack/solid-table`). Uploads moved to their own tab
+(`/portal/<org>/statements/uploads`), next to Type rules.
+
+- Grid features: search (description, type, account, amount), filters for account (when there's more
+  than one), type (including "no type") and a date range, sorting (shift-click for multi-column),
+  pagination (25–250 rows), and a column picker remembered per browser. In/out/net totals for the
+  filtered rows, per currency. Each row links to the latest upload that contained it.
+- Everything happens in the browser on the full list, which is fine for thousands of rows. If an org
+  grows to hundreds of thousands, move filtering and paging to the server.
+

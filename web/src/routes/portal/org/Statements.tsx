@@ -293,14 +293,14 @@ function UploadsList() {
   );
 }
 
-/** /portal/<org>/statements. Needs `read-statements`; uploading needs `write-statements`. */
-export function StatementsPage() {
+/** /portal/<org>/statements/uploads. Needs `read-statements`; uploading needs `write-statements`. */
+export function UploadsPage() {
   const org = useOrg();
   return (
     <Allowed when={can(org, "read-statements")}>
       <PageHeader
         title="Statements"
-        description={`Bank statements for ${org.name}. Each saved row can also be sent to your own Google Sheet.`}
+        description={`Statement files saved for ${org.name}. Open one to see its rows or send them to your own Google Sheet.`}
       />
       <StatementsTabs />
       <Show when={can(org, "write-statements")}>

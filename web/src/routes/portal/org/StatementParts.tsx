@@ -6,7 +6,7 @@ import { useOrg } from "~/routes/portal/org/OrgLayout";
 
 const TAB = "rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-/** Statements | Type rules, under the page header. */
+/** Transactions | Uploads | Type rules, under the page header. */
 export function StatementsTabs() {
   const org = useOrg();
   return (
@@ -15,6 +15,15 @@ export function StatementsTabs() {
         to="/portal/$org/statements"
         params={{ org: org.slug }}
         activeOptions={{ exact: true }}
+        class={TAB}
+        activeProps={{ class: "bg-secondary text-foreground" }}
+        inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
+      >
+        Transactions
+      </Link>
+      <Link
+        to="/portal/$org/statements/uploads"
+        params={{ org: org.slug }}
         class={TAB}
         activeProps={{ class: "bg-secondary text-foreground" }}
         inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}

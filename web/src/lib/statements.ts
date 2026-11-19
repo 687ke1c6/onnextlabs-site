@@ -131,3 +131,18 @@ export const formatPeriod = (first: string | null, last: string | null) =>
 export const formatAmount = (amount: string) => (amount.startsWith("-") ? `−${amount.slice(1)}` : amount);
 
 export const isNegative = (amount: string) => amount.trim().startsWith("-");
+
+/** A stored row in the org, with the most recent upload that contained it. */
+export type OrgTransaction = Transaction & {
+  account_number: string;
+  updated_at: string;
+  upload_id: number | null;
+  upload_filename: string | null;
+};
+
+/** Every stored row in the org, newest first. */
+export const fetchOrgTransactions = async (org: string) =>
+  json<OrgTransaction[]>(await fetch(`${base(org)}/statement-transactions`), "Couldn't load transactions.");
+
+/** The amount as a number (the stored string is kept exactly as in the file). NaN if unreadable. */
+export const amountValue = (amount: string) => Number(amount.replace(/,/g, "").trim());

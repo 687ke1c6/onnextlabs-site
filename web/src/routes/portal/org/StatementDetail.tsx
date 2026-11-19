@@ -34,7 +34,7 @@ function Detail() {
     setError(null);
     try {
       await deleteUpload(org.slug, u.id);
-      void navigate({ to: "/portal/$org/statements", params: { org: org.slug } });
+      void navigate({ to: "/portal/$org/statements/uploads", params: { org: org.slug } });
     } catch (e) {
       setError(errorText(e, "Couldn't delete the statement."));
       setDeleting(false);
@@ -44,11 +44,11 @@ function Detail() {
   return (
     <>
       <Link
-        to="/portal/$org/statements"
+        to="/portal/$org/statements/uploads"
         params={{ org: org.slug }}
         class="mb-4 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft size={14} /> Statements
+        <ArrowLeft size={14} /> Uploads
       </Link>
 
       <Show when={upload.error}>

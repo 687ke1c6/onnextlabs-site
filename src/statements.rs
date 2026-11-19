@@ -66,6 +66,10 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
         )
         .route("/api/orgs/{org}/statements/{id}", get(show).delete(remove))
         .route(
+            "/api/orgs/{org}/statement-transactions",
+            get(all_transactions),
+        )
+        .route(
             "/api/orgs/{org}/statement-rules",
             get(get_rules).put(put_rules),
         )
@@ -530,6 +534,55 @@ pub async fn upload_detail(
         format_name,
         transactions,
     })
+}
+
+/// A stored row with where it came from, for the org-wide transactions grid.
+#[derive(Serialize, sqlx::FromRow)]
+struct OrgTransaction {
+    txn_id: i64,
+    account_number: String,
+    date: String,
+    amount: String,
+    description: String,
+    currency: String,
+    #[serde(rename = "type")]
+    #[sqlx(rename = "type")]
+    category: Option<String>,
+    updated_at: String,
+    /// The most recent upload containing it (rows always belong to at least one).
+    upload_id: Option<i64>,
+    upload_filename: Option<String>,
+}
+
+/// GET /api/orgs/{org}/statement-transactions — every stored row in the org, newest first.
+/// The page sorts, filters and pages them itself.
+async fn all_transactions(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+) -> Result<Json<Vec<OrgTransaction>>, Response> {
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
+    Ok(Json(
+        org_transactions(&state.db, org.id)
+            .await
+            .map_err(db_error)?,
+    ))
+}
+
+async fn org_transactions(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<OrgTransaction>> {
+    sqlx::query_as(
+        "SELECT t.txn_id, t.account_number, t.date, t.amount, t.description, t.currency, t.type,
+                t.updated_at, u.id AS upload_id, u.filename AS upload_filename
+         FROM statement_transactions t
+         LEFT JOIN statement_uploads u ON u.id = (
+             SELECT max(l.upload_id) FROM statement_upload_transactions l
+             WHERE l.transaction_id = t.id)
+         WHERE t.org_id = ?
+         ORDER BY t.date DESC, t.id DESC",
+    )
+    .bind(org_id)
+    .fetch_all(db)
+    .await
 }
 
 /// DELETE /api/orgs/{org}/statements/{id} — removes the upload and the rows no other upload
@@ -1026,6 +1079,23 @@ mod tests {
             count(&db, "SELECT count(*) FROM statement_transactions").await,
             3 * n
         );
+    }
+
+    #[tokio::test]
+    async fn org_rows_list_each_row_once_with_its_latest_upload() {
+        let (db, org, user) = test_db().await;
+        let st = parsed(&[]);
+        store(&db, &org, user, "a.csv", "x", &st, None)
+            .await
+            .unwrap();
+        let second = store(&db, &org, user, "b.csv", "x", &st, None)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id).await.unwrap();
+        assert_eq!(rows.len(), st.transactions.len());
+        assert!(rows.iter().all(|r| r.upload_id == Some(second)));
+        assert!(rows.windows(2).all(|w| w[0].date >= w[1].date));
+        assert!(org_transactions(&db, org.id + 1).await.unwrap().is_empty());
     }
 
     #[tokio::test]

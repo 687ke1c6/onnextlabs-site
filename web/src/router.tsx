@@ -30,7 +30,8 @@ const SettingsPage = lazyRouteComponent(() => import("~/routes/portal/Settings")
 const OrgLayout = lazyRouteComponent(() => import("~/routes/portal/org/OrgLayout"), "OrgLayout");
 const OrgDashboardPage = lazyRouteComponent(() => import("~/routes/portal/org/Dashboard"), "OrgDashboardPage");
 const DocumentsPage = lazyRouteComponent(() => import("~/routes/portal/org/Documents"), "DocumentsPage");
-const StatementsPage = lazyRouteComponent(() => import("~/routes/portal/org/Statements"), "StatementsPage");
+const TransactionsPage = lazyRouteComponent(() => import("~/routes/portal/org/Transactions"), "TransactionsPage");
+const UploadsPage = lazyRouteComponent(() => import("~/routes/portal/org/Statements"), "UploadsPage");
 const StatementDetailPage = lazyRouteComponent(() => import("~/routes/portal/org/StatementDetail"), "StatementDetailPage");
 const TypeRulesPage = lazyRouteComponent(() => import("~/routes/portal/org/TypeRules"), "TypeRulesPage");
 
@@ -42,7 +43,8 @@ const TypeRulesPage = lazyRouteComponent(() => import("~/routes/portal/org/TypeR
 // /portal/roles                roles and their permissions (write-roles)
 // /portal/<org>                an org's dashboard (OrgLayout: resolves the slug)
 // /portal/<org>/documents      its document store (read-docs; uploading needs write-docs)
-// /portal/<org>/statements     bank statements (read-statements; saving needs write-statements)
+// /portal/<org>/statements     every saved transaction (read-statements)
+// /portal/<org>/statements/uploads   saved statement files; uploading needs write-statements
 // /portal/<org>/statements/rules     type rules (editing needs write-statements)
 // /portal/<org>/statements/<id>      one saved statement
 // Static segments win over $org, and the server reserves those names as slugs.
@@ -70,7 +72,8 @@ const orgDocumentsRoute = createRoute({
   }),
 });
 
-const orgStatementsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements", component: StatementsPage });
+const orgStatementsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements", component: TransactionsPage });
+const orgUploadsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/uploads", component: UploadsPage });
 const orgTypeRulesRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/rules", component: TypeRulesPage });
 const orgStatementRoute = createRoute({
   getParentRoute: () => orgRoute,
@@ -93,6 +96,7 @@ export const router = createRouter({
         orgDashboardRoute,
         orgDocumentsRoute,
         orgStatementsRoute,
+        orgUploadsRoute,
         orgTypeRulesRoute,
         orgStatementRoute,
       ]),
