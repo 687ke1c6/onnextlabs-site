@@ -10,7 +10,7 @@ use axum::{
     extract::{Path as UrlPath, State},
     http::StatusCode,
     response::Response,
-    routing::{get, patch},
+    routing::{delete, get, patch},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,11 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/orgs", get(my_orgs))
         .route("/api/manage/orgs", get(manageable_orgs).post(create_org))
+        .route("/api/manage/orgs/{org}", delete(delete_org))
+        .route(
+            "/api/manage/orgs/{org}/delete-impact",
+            get(delete_org_preview),
+        )
         .route("/api/orgs/{org}", patch(rename_org))
         .route(
             "/api/orgs/{org}/members",
@@ -287,6 +292,65 @@ async fn rename_org(
             .map_err(db_error)?;
     tracing::info!(org = %org.slug, from = %org.name, to = %renamed.name, user = user.id, "organisation renamed");
     Ok(Json(renamed))
+}
+
+/// GET /api/manage/orgs/{org}/delete-impact — what deleting the org would remove (admins).
+async fn delete_org_preview(
+    Admin(_): Admin,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+) -> Result<Json<crate::delete_impact::Impact>, Response> {
+    let org = find(&state.db, &slug).await?;
+    let mut conn = state.db.acquire().await.map_err(db_error)?;
+    let impact = crate::delete_impact::impact(&mut conn, &[("organisations", vec![org.id])])
+        .await
+        .map_err(db_error)?;
+    Ok(Json(impact))
+}
+
+#[derive(Deserialize)]
+struct DeleteOrg {
+    /// The org's name, typed by the admin to confirm.
+    confirm: String,
+}
+
+/// DELETE /api/manage/orgs/{org} — deletes the org and, through the foreign keys, everything
+/// in it: memberships, document entries, statements and their rows, types, rules, links.
+/// Accounts stay; files in storage aren't touched. Admins only, confirmed with the name.
+async fn delete_org(
+    Admin(admin): Admin,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+    Json(body): Json<DeleteOrg>,
+) -> Result<StatusCode, Response> {
+    let org = find(&state.db, &slug).await?;
+    if body.confirm.trim() != org.name {
+        return Err(bad_request(
+            "Type the organisation's name exactly to confirm.",
+        ));
+    }
+    let mut conn = state.db.acquire().await.map_err(db_error)?;
+    let impact = crate::delete_impact::impact(&mut conn, &[("organisations", vec![org.id])])
+        .await
+        .map_err(db_error)?;
+    if impact.blocked {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "Something still depends on this organisation; see the preview.",
+        ));
+    }
+    sqlx::query("DELETE FROM organisations WHERE id = ?")
+        .bind(org.id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+    let summary: Vec<String> = impact
+        .effects
+        .iter()
+        .map(|e| format!("{} {:?} {}", e.table, e.action, e.count))
+        .collect();
+    tracing::warn!(org = %org.slug, name = %org.name, user = admin.id, effects = ?summary, "organisation deleted");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// A trimmed organisation name: 1–100 characters.

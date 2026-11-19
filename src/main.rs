@@ -7,6 +7,7 @@ mod altcha;
 mod api;
 mod auth;
 mod db;
+mod delete_impact;
 mod documents;
 mod orgs;
 mod rate_limit;

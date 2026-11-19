@@ -119,6 +119,10 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
             post(preview).layer(DefaultBodyLimit::max(body_limit)),
         )
         .route("/api/orgs/{org}/statements/{id}", get(show).delete(remove))
+        .route(
+            "/api/orgs/{org}/statements/{id}/delete-impact",
+            get(delete_preview),
+        )
         .route("/api/orgs/{org}/statement-accounts", get(accounts))
         .route(
             "/api/orgs/{org}/statement-transactions",
@@ -840,7 +844,63 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The rows of an upload that no other saved statement contains: deleting the upload deletes
+/// these. (Rows another statement also contains stay, or that statement would lose them.)
+async fn rows_only_in(db: &mut sqlx::SqliteConnection, upload_id: i64) -> sqlx::Result<Vec<i64>> {
+    sqlx::query_scalar(
+        "SELECT l.transaction_id FROM statement_upload_transactions l
+         WHERE l.upload_id = ?1 AND NOT EXISTS (
+             SELECT 1 FROM statement_upload_transactions o
+             WHERE o.transaction_id = l.transaction_id AND o.upload_id <> ?1)",
+    )
+    .bind(upload_id)
+    .fetch_all(db)
+    .await
+}
+
+#[derive(Serialize)]
+struct UploadDeletePreview {
+    #[serde(flatten)]
+    impact: crate::delete_impact::Impact,
+    /// Rows of this statement that another saved statement also contains: they stay.
+    shared_rows: i64,
+}
+
+/// GET /api/orgs/{org}/statements/{id}/delete-impact — what deleting it would remove.
+async fn delete_preview(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath((slug, id)): UrlPath<(String, i64)>,
+) -> Result<Json<UploadDeletePreview>, Response> {
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
+    upload_detail(&state.db, org.id, id).await?; // 404 unless it's this org's
+    let mut conn = state.db.acquire().await.map_err(db_error)?;
+    let only_here = rows_only_in(&mut conn, id).await.map_err(db_error)?;
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM statement_upload_transactions WHERE upload_id = ?",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_error)?;
+    let impact = crate::delete_impact::impact(
+        &mut conn,
+        &[
+            ("statement_uploads", vec![id]),
+            ("statement_transactions", only_here.clone()),
+        ],
+    )
+    .await
+    .map_err(db_error)?;
+    Ok(Json(UploadDeletePreview {
+        impact,
+        shared_rows: linked - only_here.len() as i64,
+    }))
+}
+
 /// `None` if there's no such upload in the org; otherwise how many rows were deleted with it.
+/// Deletes the upload, its rows that no other statement contains, and (by cascade) their
+/// links and attached-document links. Documents themselves stay.
 async fn delete_upload(db: &SqlitePool, org_id: i64, id: i64) -> sqlx::Result<Option<u64>> {
     let mut tx = db.begin().await?;
     let exists: Option<i64> =

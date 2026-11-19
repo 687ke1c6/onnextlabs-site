@@ -1,4 +1,5 @@
 import type { Permission } from "~/lib/roles";
+import type { DeleteImpact } from "~/lib/deleteImpact";
 
 /** An organisation the signed-in user can open. */
 export type Org = {
@@ -57,6 +58,17 @@ export const fetchManageableOrgs = async () =>
 /** Admins only. */
 export const createOrg = async (name: string, slug: string) =>
   json<Org>(await send("POST", "/api/manage/orgs", { name, slug }), "Couldn't create the organisation.");
+
+/** What deleting the org would remove (admins). */
+export const fetchOrgDeleteImpact = async (slug: string) =>
+  json<DeleteImpact>(
+    await fetch(`/api/manage/orgs/${encodeURIComponent(slug)}/delete-impact`),
+    "Couldn't work out what this deletes.",
+  );
+
+/** Deletes the org and everything in it (admins; `confirm` is its name, typed). */
+export const deleteOrg = async (slug: string, confirm: string) =>
+  json<void>(await send("DELETE", `/api/manage/orgs/${encodeURIComponent(slug)}`, { confirm }), "Couldn't delete the organisation.");
 
 /** Admins, or `manage-orgs` in that org. The slug never changes. */
 export const renameOrg = async (slug: string, name: string) =>

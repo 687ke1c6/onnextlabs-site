@@ -3,9 +3,10 @@ import { Link, useNavigate, useParams } from "@tanstack/solid-router";
 import ArrowLeft from "lucide-solid/icons/arrow-left";
 import Download from "lucide-solid/icons/download";
 import Trash from "lucide-solid/icons/trash";
+import { DeleteDialog } from "~/components/DeleteDialog";
 import { Button } from "~/components/ui/button";
 import { can } from "~/lib/orgs";
-import { deleteUpload, fetchUpload, formatDate, formatPeriod } from "~/lib/statements";
+import { deleteUpload, fetchUpload, fetchUploadDeleteImpact, formatDate, formatPeriod } from "~/lib/statements";
 import { settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
@@ -20,25 +21,14 @@ function Detail() {
   const navigate = useNavigate();
   const id = () => Number(params().upload);
   const [upload] = createResource(id, (n) => fetchUpload(org.slug, n));
-  const [deleting, setDeleting] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [confirming, setConfirming] = createSignal(false);
+  // Rows another saved statement also contains (they stay), from the delete preview.
+  const [shared, setShared] = createSignal(0);
 
   const remove = async () => {
-    const u = settled(upload);
-    if (!u) return;
-    const msg =
-      `Delete ${u.filename}? Rows that no other saved statement contains are deleted too.` +
-      (u.document_id ? " The copy in Documents stays." : "");
-    if (!confirm(msg)) return;
-    setDeleting(true);
-    setError(null);
-    try {
-      await deleteUpload(org.slug, u.id);
-      void navigate({ to: "/portal/$org/statements/uploads", params: { org: org.slug } });
-    } catch (e) {
-      setError(errorText(e, "Couldn't delete the statement."));
-      setDeleting(false);
-    }
+    await deleteUpload(org.slug, id());
+    setConfirming(false);
+    void navigate({ to: "/portal/$org/statements/uploads", params: { org: org.slug } });
   };
 
   return (
@@ -74,16 +64,13 @@ function Detail() {
                     )}
                   </Show>
                   <Show when={can(org, "write-statements")}>
-                    <Button size="sm" variant="outline" onClick={remove} disabled={deleting()}>
+                    <Button size="sm" variant="outline" onClick={() => setConfirming(true)}>
                       <Trash size={16} /> Delete
                     </Button>
                   </Show>
                 </div>
               }
             />
-            <Show when={error()}>
-              <p role="alert" class="mt-4 text-sm text-red-500">{error()}</p>
-            </Show>
 
             <dl class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
               <Fact label="Account" value={u().account_number || "Not stated"} />
@@ -101,6 +88,25 @@ function Detail() {
           </>
         )}
       </Show>
+
+      <DeleteDialog
+        open={confirming()}
+        title={`Delete ${settled(upload)?.filename ?? "this statement"}?`}
+        note={
+          <>
+            Its rows go too, unless another saved statement also contains them
+            <Show when={shared() > 0}> ({shared()} {shared() === 1 ? "row stays" : "rows stay"})</Show>. Documents attached to rows,
+            and the statement's own file, stay in Documents.
+          </>
+        }
+        load={async () => {
+          const impact = await fetchUploadDeleteImpact(org.slug, id());
+          setShared(impact.shared_rows);
+          return impact;
+        }}
+        onConfirm={remove}
+        onClose={() => setConfirming(false)}
+      />
     </>
   );
 }

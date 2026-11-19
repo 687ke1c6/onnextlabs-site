@@ -31,7 +31,10 @@ Signing in alone grants nothing. Access comes from:
   the first one). You can't remove your own admin flag. Org roles never make anyone an admin.
 - **Organisations** are created by admins. Their name can be changed later (Manage →
   Organisations, by admins or anyone with `manage-orgs` there); their URL name can't, as it's
-  also their folder in file storage.
+  also their folder in file storage. Admins can delete one there too: a preview lists
+  everything that goes with it (worked out from the database's foreign keys), and the name is
+  typed to confirm. Memberships, document entries, statements, types and rules are deleted;
+  accounts stay, and files in storage aren't touched.
 - **Organisation membership**: members land on `/portal`, see their organisations, and open
   each at `/portal/<slug>`. Each membership has one **role**, so someone can be an Admin-org in
   one org and a Member in another.
@@ -157,8 +160,9 @@ Bank CSV so far), checks the preview, and saves it. Saving stores every row in t
 - The original file is always kept in Documents, in `Statements/<account number>`, saved on
   the uploader's behalf and **private** (only members with `read-docs` can open it). Saving a
   file that's already in Documents reuses that document instead of adding a copy.
-- Deleting a saved statement deletes the rows no other saved statement contains. Its file
-  stays in Documents.
+- Deleting a saved statement (after a preview of what goes) deletes its rows that no other
+  saved statement contains, with their attached-document links. Its file and attached
+  documents stay in Documents.
 
 From a saved statement, anyone with `read-statements` can **send it to their own Google
 Sheet**. "Connect Google Sheets" asks Google for access to their spreadsheets (separately

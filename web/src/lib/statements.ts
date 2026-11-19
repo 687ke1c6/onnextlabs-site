@@ -1,4 +1,5 @@
 import { json, send } from "~/lib/orgs";
+import type { DeleteImpact } from "~/lib/deleteImpact";
 
 /** A row as parsed (preview) or stored. `txn_id` is the prod n8n id. */
 export type Transaction = {
@@ -114,6 +115,13 @@ export const accountLabel = (account: string) => account || "No account stated";
 
 export const fetchUpload = async (org: string, id: number) =>
   json<UploadDetail>(await fetch(`${base(org)}/statements/${id}`), "Couldn't load this statement.");
+
+/** What deleting a saved statement would remove; `shared_rows` stay (another statement has them). */
+export const fetchUploadDeleteImpact = async (org: string, id: number) =>
+  json<DeleteImpact & { shared_rows: number }>(
+    await fetch(`${base(org)}/statements/${id}/delete-impact`),
+    "Couldn't work out what this deletes.",
+  );
 
 export const deleteUpload = async (org: string, id: number) =>
   json<void>(await send("DELETE", `${base(org)}/statements/${id}`), "Couldn't delete the statement.");

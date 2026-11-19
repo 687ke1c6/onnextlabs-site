@@ -3,8 +3,10 @@ import { Link } from "@tanstack/solid-router";
 import Building2 from "lucide-solid/icons/building";
 import ChevronDown from "lucide-solid/icons/chevron-down";
 import Pencil from "lucide-solid/icons/pencil";
+import Trash from "lucide-solid/icons/trash";
 import Plus from "lucide-solid/icons/plus";
 import UserMinus from "lucide-solid/icons/user-minus";
+import { DeleteDialog } from "~/components/DeleteDialog";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { UserChip } from "~/components/UserChip";
@@ -14,6 +16,8 @@ import {
   addMember,
   changeMemberRole,
   createOrg,
+  deleteOrg,
+  fetchOrgDeleteImpact,
   fetchManageableOrgs,
   fetchMembers,
   type Member,
@@ -351,6 +355,8 @@ function ManageOrganisations() {
   const [users] = createResource(fetchUsers);
   const [roles] = createResource(fetchRoles);
   const [open, setOpen] = createSignal<string | null>(null);
+  // The org being deleted (admins), shown in the confirm dialog.
+  const [deleting, setDeleting] = createSignal<OrgSummary | null>(null);
 
   // Keep the rail and the /portal list in step with changes made here (your own role may change).
   const changed = () => {
@@ -401,6 +407,17 @@ function ManageOrganisations() {
                           {org.member_count} {org.member_count === 1 ? "member" : "members"}
                           <ChevronDown size={16} class={cn("transition-transform", expanded() && "rotate-180")} />
                         </button>
+                        <Show when={admin}>
+                          <button
+                            type="button"
+                            onClick={() => setDeleting(org)}
+                            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-red-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            aria-label={`Delete ${org.name}`}
+                            title="Delete organisation"
+                          >
+                            <Trash size={16} />
+                          </button>
+                        </Show>
                       </div>
                       <Show when={expanded()}>
                         <Members
@@ -419,6 +436,27 @@ function ManageOrganisations() {
           </Show>
         )}
       </Show>
+
+      <DeleteDialog
+        open={deleting() !== null}
+        title={`Delete ${deleting()?.name ?? "organisation"}?`}
+        note={
+          <>
+            This deletes the organisation and everything recorded in it. People's accounts stay, and files already in storage aren't
+            touched. This can't be undone.
+          </>
+        }
+        load={() => fetchOrgDeleteImpact(deleting()!.slug)}
+        confirmText={deleting()?.name}
+        onConfirm={async () => {
+          const org = deleting()!;
+          await deleteOrg(org.slug, org.name);
+          setDeleting(null);
+          if (open() === org.slug) setOpen(null);
+          changed();
+        }}
+        onClose={() => setDeleting(null)}
+      />
     </>
   );
 }

@@ -316,3 +316,22 @@ D. ✅ Types in the upload preview: each row's Type cell is a dropdown of the li
    The preview shows the type each row will actually have (a stored hand-set type stays; a rule's
    blank never replaces a stored type). `POST .../statements` takes an optional `types` field:
    JSON `{"<n8n id>": "TYPE" | null}`, checked against the statement's rows and the types list.
+
+## Deleting: previews from the foreign keys
+
+`src/delete_impact.rs` works out what a delete would do from the database's own foreign keys
+(`pragma_foreign_key_list`): starting from the rows to delete, it walks *down* to the rows
+referencing them and follows each key's `ON DELETE` rule: CASCADE (deleted too, walked further),
+SET NULL (kept, link cleared), RESTRICT / NO ACTION (blocks). It never walks up to what a row
+points at. Read-only; the delete itself is a plain `DELETE` the foreign keys carry out.
+
+- **Organisation** (admins, `DELETE /api/manage/orgs/{slug}` with the name typed to confirm;
+  preview at `.../delete-impact`): one delete of the org; the cascades remove memberships,
+  document entries, statements and rows, types, rules and links. Accounts stay; storage files
+  aren't touched.
+- **Saved statement** (preview at `/api/orgs/{slug}/statements/{id}/delete-impact`): the walk
+  starts from the upload plus its rows that no other statement contains (the delete rule), and
+  reports how many shared rows stay. Rows stay shared between uploads (many-to-many), as built.
+- A shared `DeleteDialog` shows the preview (deleted / kept with link removed / blocking) before
+  any delete.
+
