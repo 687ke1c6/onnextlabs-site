@@ -104,6 +104,7 @@ export function DataGrid<T>(props: {
   const [visibility, setVisibility] = createSignal<VisibilityState>(initialVisibility(props.storageKey, props.defaultHidden ?? []));
   const [pagination, setPagination] = createSignal({ pageIndex: 0, pageSize: 50 });
   const firstPage = () => setPagination((p) => ({ ...p, pageIndex: 0 }));
+  let searchInput!: HTMLInputElement;
   onMount(gridMounted);
   onCleanup(gridUnmounted);
   const compact = compactGrids;
@@ -184,15 +185,48 @@ export function DataGrid<T>(props: {
     <div class="flex min-h-[24rem] flex-1 flex-col gap-3">
       {/* Toolbar */}
       <div class="flex flex-wrap items-end gap-2">
-        <div class="relative min-w-0 flex-[2_1_14rem]">
-          <Search size={16} class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        {/* Search: a magnifying glass that slides open on hover or focus, and stays open while
+            it holds text. */}
+        <div
+          class={cn(
+            "group relative h-9 max-w-full shrink-0 transition-[width] duration-200 ease-out",
+            query() ? "w-72" : "w-9 hover:w-72 focus-within:w-72",
+          )}
+        >
+          <Search size={16} class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
-            class="h-9 pl-9"
+            ref={searchInput}
+            class={cn(
+              "h-9 pl-9 pr-8",
+              // Closed: just the icon (no placeholder showing through).
+              !query() &&
+                "cursor-pointer placeholder:text-transparent group-focus-within:cursor-text group-focus-within:placeholder:text-muted-foreground group-hover:cursor-text group-hover:placeholder:text-muted-foreground",
+            )}
             value={query()}
             onInput={(e) => table.setGlobalFilter(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Escape") return;
+              if (query()) table.setGlobalFilter("");
+              else e.currentTarget.blur();
+            }}
             placeholder={props.searchPlaceholder}
             aria-label="Search"
+            title={query() ? undefined : "Search"}
           />
+          <Show when={query()}>
+            <button
+              type="button"
+              onClick={() => {
+                table.setGlobalFilter("");
+                searchInput.focus();
+              }}
+              class="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label="Clear search"
+              title="Clear search"
+            >
+              <X size={14} />
+            </button>
+          </Show>
         </div>
         <Menu
           label="Columns"
