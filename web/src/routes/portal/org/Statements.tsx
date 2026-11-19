@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Link, useNavigate } from "@tanstack/solid-router";
 import FileSpreadsheet from "lucide-solid/icons/file-spreadsheet";
 import FolderOpen from "lucide-solid/icons/folder-open";
@@ -13,6 +13,7 @@ import {
   fetchUploads,
   formatDate,
   formatPeriod,
+  fetchTypes,
   type Preview,
   previewStatement,
   saveStatement,
@@ -39,6 +40,19 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
 
   const [file, setFile] = createSignal<File | null>(null);
   const [preview, setPreview] = createSignal<Preview | null>(null);
+  // Types picked in the preview, by n8n id (null = cleared). Saved as hand-set.
+  const [picks, setPicks] = createSignal<Record<number, string | null>>({});
+  const [types] = createResource(() => org.slug, fetchTypes);
+  const typeNames = () => (settled(types) ?? []).map((t) => t.name);
+  // The preview's rows with the picks applied, as they'll be saved.
+  const shownRows = createMemo(() => {
+    const p = preview();
+    if (!p) return [];
+    const chosen = picks();
+    return p.transactions.map((t) =>
+      t.txn_id in chosen ? { ...t, type: chosen[t.txn_id], type_manual: chosen[t.txn_id] !== null } : t,
+    );
+  });
   const [busy, setBusy] = createSignal<"reading" | "saving" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [dragging, setDragging] = createSignal(false);
@@ -46,6 +60,7 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
   const reset = () => {
     setFile(null);
     setPreview(null);
+    setPicks({});
     setError(null);
     if (fileInput) fileInput.value = "";
   };
@@ -59,6 +74,7 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
     setBusy("reading");
     try {
       const p = await previewStatement(org.slug, f);
+      setPicks({});
       setPreview(p);
     } catch (e) {
       setError(errorText(e, "Couldn't read that statement."));
@@ -74,7 +90,7 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
     setError(null);
     setBusy("saving");
     try {
-      const saved = await saveStatement(org.slug, f);
+      const saved = await saveStatement(org.slug, f, picks());
       // The Statements pages now show the account this statement belongs to.
       props.onSaved(saved.account_number);
       void navigate({ to: "/portal/$org/statements/$upload", params: { org: org.slug, upload: String(saved.id) } });
@@ -166,7 +182,7 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
               <Fact label="Format" value={p().format_name} />
               <Fact label="Account" value={p().account_number ?? "Not stated"} />
               <Fact label="Period" value={formatPeriod(p().first_date, p().last_date)} />
-              <Fact label="Rows" value={`${p().rows} (${p().typed} typed)`} />
+              <Fact label="Rows" value={`${p().rows} (${shownRows().filter((t) => t.type).length} typed)`} />
             </dl>
             <p class="mt-3 text-sm text-muted-foreground">
               {p().new} new {p().new === 1 ? "row" : "rows"}
@@ -177,8 +193,16 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
               .
             </p>
 
-            <div class="mt-4 max-h-[28rem] overflow-y-auto">
-              <TransactionsTable rows={p().transactions} showStored />
+            <p class="mt-3 text-xs text-muted-foreground">
+              Change any row's type below before saving. A type you pick here is set by hand: later saves won't change it.
+            </p>
+            <div class="mt-2 max-h-[28rem] overflow-y-auto">
+              <TransactionsTable
+                rows={shownRows()}
+                showStored
+                types={typeNames()}
+                onType={(t, type) => setPicks((all) => ({ ...all, [t.txn_id]: type }))}
+              />
             </div>
 
             {/* The file is always kept in Documents (privately), so every row can be traced back to it. */}

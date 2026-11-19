@@ -311,3 +311,8 @@ C. ✅ Row panel and attachments (`src/statement_rows.rs`): row details, source 
    `GET /api/orgs/{slug}/documents/all`; remove the link), missing files flagged. The grid gets a
    Docs column and opens the panel on a row click.
 
+D. ✅ Types in the upload preview: each row's Type cell is a dropdown of the list. A type picked
+   there is saved as hand-set; clearing one saves the row blank and not hand-set (as in the grid).
+   The preview shows the type each row will actually have (a stored hand-set type stays; a rule's
+   blank never replaces a stored type). `POST .../statements` takes an optional `types` field:
+   JSON `{"<n8n id>": "TYPE" | null}`, checked against the statement's rows and the types list.

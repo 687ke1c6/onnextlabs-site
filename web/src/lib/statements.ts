@@ -13,6 +13,8 @@ export type Transaction = {
 export type PreviewRow = Transaction & {
   /** Already stored for this org and account: saving updates it. */
   stored: boolean;
+  /** The type shown is hand-set (a stored hand-set type stays when saving). */
+  type_manual: boolean;
 };
 
 export type Preview = {
@@ -65,8 +67,9 @@ export type FormatInfo = { id: string; name: string };
 
 const base = (org: string) => `/api/orgs/${encodeURIComponent(org)}`;
 
-function form(file: File) {
+function form(file: File, types?: Record<number, string | null>) {
   const body = new FormData();
+  if (types && Object.keys(types).length > 0) body.append("types", JSON.stringify(types));
   body.append("file", file);
   return body;
 }
@@ -78,10 +81,13 @@ export const previewStatement = async (org: string, file: File) =>
     "Couldn't read that statement.",
   );
 
-/** Parses and saves it; the file itself is kept in Documents (Statements/<account>). */
-export const saveStatement = async (org: string, file: File) =>
+/**
+ * Parses and saves it; the file itself is kept in Documents (Statements/<account>). `types`:
+ * types picked in the preview, by n8n id (null clears one); they're saved as hand-set.
+ */
+export const saveStatement = async (org: string, file: File, types?: Record<number, string | null>) =>
   json<UploadDetail>(
-    await fetch(`${base(org)}/statements`, { method: "POST", body: form(file) }),
+    await fetch(`${base(org)}/statements`, { method: "POST", body: form(file, types) }),
     "Couldn't save the statement.",
   );
 

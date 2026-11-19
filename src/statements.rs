@@ -13,7 +13,10 @@
 //! uploads, edit type rules (`write-statements`). Saving a copy to Documents also needs
 //! `write-docs`.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     body::Bytes,
@@ -133,16 +136,26 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
 struct UploadForm {
     filename: String,
     bytes: Bytes,
+    /// `types`: JSON `{"<n8n id>": "TYPE" | null}`, the types picked in the preview.
+    types: Option<String>,
 }
 
-/// Multipart field `file` (required).
+/// Types picked by hand in the preview, by n8n id: a type, or `None` to clear it.
+type Picks = HashMap<i32, Option<String>>;
+
+/// Multipart fields: `file` (required), `types` (optional, see `UploadForm`).
 async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadForm, Response> {
     let mut file = None;
+    let mut types = None;
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
-        if field.name() == Some("file") {
-            let name = display_name(field.file_name().unwrap_or_default());
-            let bytes = field.bytes().await.map_err(multipart_error)?;
-            file = Some((name, bytes));
+        match field.name() {
+            Some("file") => {
+                let name = display_name(field.file_name().unwrap_or_default());
+                let bytes = field.bytes().await.map_err(multipart_error)?;
+                file = Some((name, bytes));
+            }
+            Some("types") => types = Some(field.text().await.map_err(multipart_error)?),
+            _ => {}
         }
     }
     let (filename, bytes) = file.ok_or_else(|| bad_request("No file was sent."))?;
@@ -158,7 +171,48 @@ async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadFor
             "Only CSV statements are supported for now.",
         ));
     }
-    Ok(UploadForm { filename, bytes })
+    Ok(UploadForm {
+        filename,
+        bytes,
+        types,
+    })
+}
+
+/// The preview's picks, checked: ids must be rows of this statement, and types must be on the
+/// org's list (stored with the list's spelling).
+async fn read_picks(
+    db: &SqlitePool,
+    org_id: i64,
+    raw: Option<&str>,
+    st: &Statement,
+) -> Result<Picks, Response> {
+    let Some(raw) = raw.filter(|r| !r.trim().is_empty()) else {
+        return Ok(Picks::new());
+    };
+    let wanted: HashMap<String, Option<String>> =
+        serde_json::from_str(raw).map_err(|_| bad_request("The chosen types couldn't be read."))?;
+    let ids: HashSet<i32> = st.transactions.iter().map(|t| t.id).collect();
+    let mut picks = Picks::new();
+    for (key, name) in wanted {
+        let id: i32 = key
+            .parse()
+            .ok()
+            .filter(|id| ids.contains(id))
+            .ok_or_else(|| {
+                bad_request("A chosen type is for a row that isn't in this statement.")
+            })?;
+        let name = match name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            None => None,
+            Some(n) => Some(
+                crate::statement_types::canonical_name(db, org_id, n)
+                    .await
+                    .map_err(db_error)?
+                    .ok_or_else(|| bad_request(&format!("{n:?} isn't on the types list.")))?,
+            ),
+        };
+        picks.insert(id, name);
+    }
+    Ok(picks)
 }
 
 /// Detects the format, parses, assigns the n8n ids and applies the type rules.
@@ -226,8 +280,12 @@ struct PreviewRow {
     amount: String,
     description: String,
     currency: String,
+    /// The type the row will have once saved: a stored hand-set type stays; otherwise the
+    /// rules' type, or the stored one when no rule matches (a blank never replaces a type).
     #[serde(rename = "type")]
     category: Option<String>,
+    /// That type is hand-set (saving won't change it).
+    type_manual: bool,
     /// Already stored for this org and account.
     stored: bool,
 }
@@ -243,10 +301,15 @@ async fn preview(
     let form = read_form(multipart, state.max_upload_bytes).await?;
     let rules = org_rules(&state.db, org.id).await?;
     let st = parse_statement(&form.bytes, &rules)?;
-    let stored = stored_ids(&state.db, org.id, &account_of(&st)).await?;
-
+    let stored = stored_types(&state.db, org.id, &account_of(&st)).await?;
     let txs = &st.transactions;
-    let existing = txs.iter().filter(|t| stored.contains(&t.id)).count();
+    // (type, hand-set) as saving would leave it.
+    let effective = |t: &Transaction| match stored.get(&t.id) {
+        Some((typ, true)) => (typ.clone(), true),
+        Some((typ, false)) => (t.category.clone().or_else(|| typ.clone()), false),
+        None => (t.category.clone(), false),
+    };
+    let existing = txs.iter().filter(|t| stored.contains_key(&t.id)).count();
     let sha256 = hex::encode(Sha256::digest(&form.bytes));
     let existing_document = document_with_sha256(&state.db, org.id, &sha256).await?;
     Ok(Json(Preview {
@@ -257,19 +320,23 @@ async fn preview(
         first_date: txs.iter().map(|t| &t.date).min().cloned(),
         last_date: txs.iter().map(|t| &t.date).max().cloned(),
         rows: txs.len(),
-        typed: txs.iter().filter(|t| t.category.is_some()).count(),
+        typed: txs.iter().filter(|t| effective(t).0.is_some()).count(),
         new: txs.len() - existing,
         existing,
         transactions: txs
             .iter()
-            .map(|t| PreviewRow {
-                txn_id: t.id,
-                date: t.date.clone(),
-                amount: t.amount.clone(),
-                description: t.description.clone(),
-                currency: t.currency.clone(),
-                category: t.category.clone(),
-                stored: stored.contains(&t.id),
+            .map(|t| {
+                let (category, type_manual) = effective(t);
+                PreviewRow {
+                    txn_id: t.id,
+                    date: t.date.clone(),
+                    amount: t.amount.clone(),
+                    description: t.description.clone(),
+                    currency: t.currency.clone(),
+                    category,
+                    type_manual,
+                    stored: stored.contains_key(&t.id),
+                }
             })
             .collect(),
         documents_folder: statement_folder(&account_of(&st)),
@@ -277,19 +344,24 @@ async fn preview(
     }))
 }
 
-/// The n8n ids already stored for this org and account.
-async fn stored_ids(db: &SqlitePool, org_id: i64, account: &str) -> Result<HashSet<i32>, Response> {
-    let ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT txn_id FROM statement_transactions WHERE org_id = ? AND account_number = ?",
+/// The rows already stored for this org and account: n8n id -> (type, hand-set).
+async fn stored_types(
+    db: &SqlitePool,
+    org_id: i64,
+    account: &str,
+) -> Result<HashMap<i32, (Option<String>, bool)>, Response> {
+    let rows: Vec<(i64, Option<String>, bool)> = sqlx::query_as(
+        "SELECT txn_id, type, type_manual FROM statement_transactions
+         WHERE org_id = ? AND account_number = ?",
     )
     .bind(org_id)
     .bind(account)
     .fetch_all(db)
     .await
     .map_err(db_error)?;
-    Ok(ids
+    Ok(rows
         .into_iter()
-        .filter_map(|id| i32::try_from(id).ok())
+        .filter_map(|(id, typ, manual)| Some((i32::try_from(id).ok()?, (typ, manual))))
         .collect())
 }
 
@@ -308,6 +380,7 @@ async fn save(
     let form = read_form(multipart, state.max_upload_bytes).await?;
     let rules = org_rules(&state.db, org.id).await?;
     let st = parse_statement(&form.bytes, &rules)?;
+    let picks = read_picks(&state.db, org.id, form.types.as_deref(), &st).await?;
     let sha256 = hex::encode(Sha256::digest(&form.bytes));
 
     // The file first: storage is the likelier failure, and nothing is in the database yet.
@@ -330,7 +403,7 @@ async fn save(
         }
     };
 
-    let upload_id = store(
+    let upload_id = store_with(
         &state.db,
         &org,
         user.id,
@@ -338,6 +411,7 @@ async fn save(
         &sha256,
         &st,
         Some(document_id),
+        &picks,
     )
     .await
     .map_err(db_error)?;
@@ -355,8 +429,8 @@ async fn save(
     Ok((StatusCode::CREATED, Json(detail)))
 }
 
-/// One database transaction: the upload row, then each statement row upserted on
-/// `(org, account, n8n id)` and linked to the upload in file order.
+/// `store_with` and no types picked by hand.
+#[cfg(test)]
 async fn store(
     db: &SqlitePool,
     org: &Org,
@@ -365,6 +439,36 @@ async fn store(
     sha256: &str,
     st: &Statement,
     document_id: Option<i64>,
+) -> sqlx::Result<i64> {
+    store_with(
+        db,
+        org,
+        user_id,
+        filename,
+        sha256,
+        st,
+        document_id,
+        &Picks::new(),
+    )
+    .await
+}
+
+/// One database transaction: the upload row, then each statement row upserted on
+/// `(org, account, n8n id)` and linked to the upload in file order.
+///
+/// Types: a type picked in the preview (`picks`) is stored as hand-set; clearing one there
+/// stores the row blank and not hand-set. Otherwise a stored hand-set type is kept, and a
+/// blank from the rules never replaces a type.
+#[allow(clippy::too_many_arguments)]
+async fn store_with(
+    db: &SqlitePool,
+    org: &Org,
+    user_id: i64,
+    filename: &str,
+    sha256: &str,
+    st: &Statement,
+    document_id: Option<i64>,
+    picks: &Picks,
 ) -> sqlx::Result<i64> {
     let account = account_of(st);
     let mut tx = db.begin().await?;
@@ -396,7 +500,28 @@ async fn store(
         .bind(t.id)
         .fetch_optional(&mut *tx)
         .await?;
+        let pick = picks.get(&t.id);
         let row_id = match existing {
+            Some(id) if pick.is_some() => {
+                let chosen = pick.cloned().flatten();
+                sqlx::query(
+                    "UPDATE statement_transactions
+                     SET date = ?, amount = ?, description = ?, currency = ?, type = ?,
+                         type_manual = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?",
+                )
+                .bind(&t.date)
+                .bind(&t.amount)
+                .bind(&t.description)
+                .bind(&t.currency)
+                .bind(&chosen)
+                .bind(chosen.is_some())
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+                updated += 1;
+                id
+            }
             Some(id) => {
                 // A hand-set type is never changed; otherwise a blank never replaces a type.
                 sqlx::query(
@@ -419,10 +544,15 @@ async fn store(
             }
             None => {
                 new += 1;
+                let (category, manual) = match pick {
+                    Some(chosen) => (chosen.clone(), chosen.is_some()),
+                    None => (t.category.clone(), false),
+                };
                 sqlx::query_scalar(
                     "INSERT INTO statement_transactions
-                         (org_id, account_number, txn_id, date, amount, description, currency, type)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                         (org_id, account_number, txn_id, date, amount, description, currency, type,
+                          type_manual)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 )
                 .bind(org.id)
                 .bind(&account)
@@ -431,7 +561,8 @@ async fn store(
                 .bind(&t.amount)
                 .bind(&t.description)
                 .bind(&t.currency)
-                .bind(&t.category)
+                .bind(&category)
+                .bind(manual)
                 .fetch_one(&mut *tx)
                 .await?
             }
@@ -1228,6 +1359,53 @@ mod tests {
                 .unwrap()
         );
         let _ = first;
+    }
+
+    #[tokio::test]
+    async fn types_picked_in_the_preview_are_hand_set() {
+        let (db, org, user) = test_db().await;
+        let typed = parsed(&[rule("PAYMENT", &["PAYMENT"])]);
+        let paid = typed
+            .transactions
+            .iter()
+            .find(|t| t.category.is_some())
+            .unwrap()
+            .id;
+        let plain = typed
+            .transactions
+            .iter()
+            .find(|t| t.category.is_none())
+            .unwrap()
+            .id;
+        let row = |rows: &[OrgTransaction], id: i32| {
+            let r = rows.iter().find(|r| r.txn_id == i64::from(id)).unwrap();
+            (r.category.clone(), r.type_manual)
+        };
+
+        // New rows: a pick is hand-set; a cleared rule type is stored blank, not hand-set.
+        let picks = Picks::from([(plain, Some("MINE".to_string())), (paid, None)]);
+        store_with(&db, &org, user, "a.csv", "x", &typed, None, &picks)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        assert_eq!(row(&rows, plain), (Some("MINE".into()), true));
+        assert_eq!(row(&rows, paid), (None, false));
+
+        // Saved again without picks: the hand-set one stays; the cleared one is typed again.
+        store(&db, &org, user, "a.csv", "x", &typed, None)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        assert_eq!(row(&rows, plain), (Some("MINE".into()), true));
+        assert_eq!(row(&rows, paid), (Some("PAYMENT".into()), false));
+
+        // A pick also replaces an existing hand-set type.
+        let picks = Picks::from([(plain, Some("OTHER".to_string()))]);
+        store_with(&db, &org, user, "a.csv", "x", &typed, None, &picks)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        assert_eq!(row(&rows, plain), (Some("OTHER".into()), true));
     }
 
     #[tokio::test]

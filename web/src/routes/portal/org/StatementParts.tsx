@@ -1,5 +1,6 @@
 import { createMemo, createResource, For, Show } from "solid-js";
 import { Link } from "@tanstack/solid-router";
+import Hand from "lucide-solid/icons/hand";
 import { pickAccount, pickedAccount } from "~/lib/statementAccount";
 import { accountLabel, fetchAccounts, formatAmount, formatDate, isNegative, type Transaction } from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
@@ -44,8 +45,16 @@ export function StatementsTabs() {
   );
 }
 
-/** Rows of a statement, in file order. `stored` (preview only) marks rows already saved. */
-export function TransactionsTable(props: { rows: (Transaction & { stored?: boolean })[]; showStored?: boolean }) {
+/**
+ * Rows of a statement, in file order. `stored` (preview only) marks rows already saved. With
+ * `onType`, each Type cell is a dropdown of `types` (e.g. to pick types before saving).
+ */
+export function TransactionsTable(props: {
+  rows: (Transaction & { stored?: boolean; type_manual?: boolean })[];
+  showStored?: boolean;
+  types?: string[];
+  onType?: (row: Transaction, type: string | null) => void;
+}) {
   return (
     <div class="overflow-x-auto rounded-xl border border-border">
       <table class="w-full min-w-[40rem] text-sm">
@@ -54,7 +63,7 @@ export function TransactionsTable(props: { rows: (Transaction & { stored?: boole
             <th class="w-32 px-4 py-2.5 font-medium">Date</th>
             <th class="px-4 py-2.5 font-medium">Description</th>
             <th class="w-32 px-4 py-2.5 text-right font-medium">Amount</th>
-            <th class="w-40 px-4 py-2.5 font-medium">Type</th>
+            <th class="w-48 px-4 py-2.5 font-medium">Type</th>
             <Show when={props.showStored}>
               <th class="w-28 px-4 py-2.5 font-medium">
                 <span class="sr-only">Status</span>
@@ -73,9 +82,37 @@ export function TransactionsTable(props: { rows: (Transaction & { stored?: boole
                   {formatAmount(t.amount)} <span class="text-xs text-muted-foreground">{t.currency}</span>
                 </td>
                 <td class="px-4 py-2">
-                  <Show when={t.type} fallback={<span class="text-muted-foreground">—</span>}>
-                    <span class="rounded-full border border-border bg-secondary/40 px-2 py-0.5 text-xs font-medium">{t.type}</span>
-                  </Show>
+                  <span class="inline-flex w-full items-center gap-1">
+                    <Show
+                      when={props.onType}
+                      fallback={
+                        <Show when={t.type} fallback={<span class="text-muted-foreground">—</span>}>
+                          <span class="rounded-full border border-border bg-secondary/40 px-2 py-0.5 text-xs font-medium">{t.type}</span>
+                        </Show>
+                      }
+                    >
+                      <select
+                        value={t.type ?? ""}
+                        onChange={(e) => props.onType!(t, e.currentTarget.value || null)}
+                        aria-label="Type"
+                        class={cn(
+                          "h-7 min-w-0 flex-1 rounded border border-input bg-background px-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          t.type ? "font-medium" : "text-muted-foreground",
+                        )}
+                      >
+                        <option value="">—</option>
+                        <Show when={t.type && !(props.types ?? []).includes(t.type)}>
+                          <option value={t.type!}>{t.type}</option>
+                        </Show>
+                        <For each={props.types ?? []}>{(name) => <option value={name}>{name}</option>}</For>
+                      </select>
+                    </Show>
+                    <Show when={t.type_manual}>
+                      <span title="Set by hand: saving a statement won't change it" class="shrink-0 text-muted-foreground">
+                        <Hand size={11} />
+                      </span>
+                    </Show>
+                  </span>
                 </td>
                 <Show when={props.showStored}>
                   <td class="px-4 py-2 text-xs text-muted-foreground">{t.stored ? "Already saved" : "New"}</td>
