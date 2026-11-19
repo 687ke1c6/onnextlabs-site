@@ -23,7 +23,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use db_protocol::{Batch, BatchResult, Error, ErrorBody, ErrorKind, Statement, StmtResult};
+use db_protocol::{Batch, BatchResult, Error, ErrorBody, ErrorKind, Statement};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use subtle::ConstantTimeEq;
@@ -131,7 +131,47 @@ fn app(db: SqlitePool, token: &str, max_body: usize, scratch_dir: PathBuf) -> Ro
         .route("/health", get(health))
         .nest("/v1", v1)
         .layer(DefaultBodyLimit::max(max_body))
+        .layer(middleware::from_fn(log_request))
         .with_state(state)
+}
+
+/// What a handler adds to its request's log line (never argument values: only SQL text,
+/// which holds no user data, and counts).
+#[derive(Clone)]
+struct Detail(String);
+
+/// One line per request: method, path, status, time, and the handler's [`Detail`]. Health
+/// checks (polled constantly by the host) only at debug level.
+async fn log_request(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let started = std::time::Instant::now();
+    let res = next.run(req).await;
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let status = res.status().as_u16();
+    let detail = res
+        .extensions()
+        .get::<Detail>()
+        .map(|d| d.0.as_str())
+        .unwrap_or("");
+    if path == "/health" {
+        tracing::debug!("{method} {path} {status} {ms:.1}ms");
+    } else if res.status().is_server_error() {
+        tracing::error!("{method} {path} {status} {ms:.1}ms {detail}");
+    } else {
+        tracing::info!("{method} {path} {status} {ms:.1}ms {detail}");
+    }
+    res
+}
+
+/// The SQL on one line, shortened: enough to tell statements apart in the log.
+fn sql_summary(sql: &str) -> String {
+    const MAX: usize = 120;
+    let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(MAX) {
+        Some((i, _)) => format!("{}…", &flat[..i]),
+        None => flat,
+    }
 }
 
 async fn require_token(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
@@ -161,23 +201,67 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
 async fn query(
     State(state): State<Arc<AppState>>,
     body: Result<Json<Statement>, JsonRejection>,
-) -> Result<Json<StmtResult>, Response> {
-    let Json(stmt) = body.map_err(bad_json)?;
-    db_protocol::run_statement(&state.db, &stmt)
-        .await
-        .map(Json)
-        .map_err(error_response)
+) -> Response {
+    let Json(stmt) = match body {
+        Ok(b) => b,
+        Err(e) => return bad_json(e),
+    };
+    let res = db_protocol::run_statement(&state.db, &stmt).await;
+    let detail = match &res {
+        Ok(r) if !r.rows.is_empty() => {
+            format!("{} rows | {}", r.rows.len(), sql_summary(&stmt.sql))
+        }
+        Ok(r) if r.rows_affected > 0 => {
+            format!("{} changed | {}", r.rows_affected, sql_summary(&stmt.sql))
+        }
+        Ok(_) => sql_summary(&stmt.sql),
+        Err(e) => format!("{:?}: {} | {}", e.kind, e.message, sql_summary(&stmt.sql)),
+    };
+    let mut res = match res {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => error_response(e),
+    };
+    res.extensions_mut().insert(Detail(detail));
+    res
 }
 
 async fn batch(
     State(state): State<Arc<AppState>>,
     body: Result<Json<Batch>, JsonRejection>,
-) -> Result<Json<BatchResult>, Response> {
-    let Json(batch) = body.map_err(bad_json)?;
-    db_protocol::run_batch(&state.db, &batch)
-        .await
-        .map(|results| Json(BatchResult { results }))
-        .map_err(error_response)
+) -> Response {
+    let Json(batch) = match body {
+        Ok(b) => b,
+        Err(e) => return bad_json(e),
+    };
+    let res = db_protocol::run_batch(&state.db, &batch).await;
+    let n = batch.statements.len();
+    let first = batch
+        .statements
+        .first()
+        .map(|s| sql_summary(&s.sql))
+        .unwrap_or_default();
+    let detail = match &res {
+        Ok(_) => format!("{n} statements | first: {first}"),
+        Err(e) => {
+            let failed = e
+                .statement
+                .and_then(|i| batch.statements.get(i))
+                .map(|s| sql_summary(&s.sql))
+                .unwrap_or_default();
+            format!(
+                "{n} statements, rolled back: {:?} in #{}: {} | {failed}",
+                e.kind,
+                e.statement.map_or("?".into(), |i| i.to_string()),
+                e.message
+            )
+        }
+    };
+    let mut res = match res {
+        Ok(results) => Json(BatchResult { results }).into_response(),
+        Err(e) => error_response(e),
+    };
+    res.extensions_mut().insert(Detail(detail));
+    res
 }
 
 /// `VACUUM INTO` writes a consistent, compacted copy while writes carry on, without the
@@ -292,6 +376,17 @@ mod tests {
         let status = res.status();
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[test]
+    fn sql_is_summarised_on_one_line() {
+        assert_eq!(
+            sql_summary("SELECT a,\n       b\n  FROM t"),
+            "SELECT a, b FROM t"
+        );
+        let long = sql_summary(&format!("SELECT {}", "x".repeat(200)));
+        assert_eq!(long.chars().count(), 121);
+        assert!(long.ends_with('…'));
     }
 
     #[tokio::test]
