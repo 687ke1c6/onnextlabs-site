@@ -10,17 +10,18 @@ reviewed and committed on its own.
 2. The server detects the format (only Standard Bank CSV for now), parses it, gives every
    transaction its n8n-compatible id, and sets `type` from the org's **type rules**. The page
    shows a preview.
-3. **Save** stores the upload and its transactions in SQLite. Transactions already stored
-   for the same account are skipped, never changed.
+3. **Save** stores the upload and its transactions in SQLite. A transaction already stored
+   for the same org and account (same hash) is updated in place, never duplicated.
    Optionally, it also saves the original file to the org's Documents. The default folder is
    `Statements`, and this needs `write-docs` as well.
 4. Optionally, from a saved upload: **Add to Google Sheet**. Connect Google (separate
-   consent, Sheets scopes only), pick or create a spreadsheet and tab, and append the rows.
-   The rules are the same as the POC: ids already in the tab are skipped, and the header row
-   is written to an empty tab.
+   consent, Sheets scopes only), pick or create a spreadsheet and tab, and append **every
+   row of that statement**, whether or not it was already in the database. The rules are the
+   same as the POC and prod: ids already in the tab are skipped (existing sheet rows are never
+   changed), and the header row is written to an empty tab.
 
 The database is the record. The Google Sheet is an optional copy for each person, going to
-a sheet they own.
+a sheet they own. Having a row in the database never stops it going to a sheet.
 
 ## Decisions
 
@@ -48,26 +49,37 @@ CREATE TABLE statement_uploads (
     filename       TEXT    NOT NULL,             -- as uploaded
     sha256         TEXT    NOT NULL,             -- of the file
     rows_parsed    INTEGER NOT NULL,
-    rows_added     INTEGER NOT NULL,             -- parsed minus already stored
+    rows_new       INTEGER NOT NULL,             -- not stored before this upload
+    rows_updated   INTEGER NOT NULL,             -- already stored; updated in place
     document_id    INTEGER REFERENCES documents (id) ON DELETE SET NULL,
     uploaded_by    INTEGER REFERENCES users (id) ON DELETE SET NULL,
     uploaded_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
 
--- The canonical rows: the n8n shape plus where they came from.
+-- The canonical rows: the n8n shape plus org and account. One row per (org, account, hash),
+-- however many uploads contained it.
 CREATE TABLE statement_transactions (
     id             INTEGER PRIMARY KEY,
     org_id         INTEGER NOT NULL REFERENCES organisations (id) ON DELETE CASCADE,
-    upload_id      INTEGER NOT NULL REFERENCES statement_uploads (id) ON DELETE CASCADE,
     account_number TEXT    NOT NULL DEFAULT '',  -- '' when the format doesn't state one
     txn_id         INTEGER NOT NULL,             -- the prod n8n i32 hash, as written to Sheets
     date           TEXT    NOT NULL,             -- YYYY-MM-DD
     amount         TEXT    NOT NULL,             -- raw string, part of the hash
     description    TEXT    NOT NULL,             -- incl. any '_' suffix and trailing spaces
     currency       TEXT    NOT NULL,
-    type           TEXT,                         -- from the type rules at save time
+    type           TEXT,                         -- from the type rules at the latest save
+    updated_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (org_id, account_number, txn_id)
 ) STRICT;
+
+-- Which transactions each upload contained (all of them, new or already stored).
+CREATE TABLE statement_upload_transactions (
+    upload_id      INTEGER NOT NULL REFERENCES statement_uploads (id) ON DELETE CASCADE,
+    transaction_id INTEGER NOT NULL REFERENCES statement_transactions (id) ON DELETE CASCADE,
+    position       INTEGER NOT NULL,             -- row order in the file, for the sheet
+    PRIMARY KEY (upload_id, transaction_id)
+) STRICT;
+CREATE INDEX statement_upload_transactions_txn ON statement_upload_transactions (transaction_id);
 
 CREATE TABLE statement_type_rules (
     id          INTEGER PRIMARY KEY,
@@ -90,9 +102,17 @@ Decided:
   `UNIQUE (org_id, account_number, txn_id)` only stops a row from being stored twice for
   the same org and account. The same hash in another org or account is fine. For formats
   with no account number (none yet), every file of that format shares `''`.
-- **Deleting an upload** removes its transactions, so re-uploading the statement adds them
-  again. A linked document is left alone.
-- **Columns:** `org_id` and `upload_id` are enough for now.
+- **Re-uploading overwrites.** Saving upserts on `(org_id, account_number, txn_id)`. The
+  hash inputs (date, description, amount) are identical by definition, so in practice this
+  refreshes `type` from the current rules and `updated_at`. Re-uploading a statement is
+  also how edited rules get applied to stored rows. (If manual type edits are added later,
+  this will need revisiting.)
+- **Rows are shared between uploads.** `statement_upload_transactions` links each upload to
+  every row it contained, so "Add to Google Sheet" sends the whole statement.
+- **Deleting an upload** removes its links and any transactions no other upload still
+  contains. A linked document is left alone.
+- **The sheet still skips, never overwrites.** That's prod behaviour, kept unchanged.
+- **Columns:** `org_id` and the upload links are enough for now.
 
 ## Step 0: Workspace and core crate (no visible change) ✅
 
@@ -122,9 +142,10 @@ dependencies). Notes:
 
 - `POST /api/orgs/{slug}/statements/preview` (multipart): parse, apply the rules, and
   return format, account number, row count, how many rows got a type, the first rows,
-  and how many rows are already stored.
+  and how many rows are new and how many will be updated.
 - `POST /api/orgs/{slug}/statements` (multipart, plus `save_to_documents` and `folder`):
-  parse again, insert the upload and new transactions in one transaction, and optionally
+  parse again, then in one database transaction insert the upload, upsert every row and
+  link them all to the upload, and optionally
   store the file in Documents (creating `Statements` if it's missing).
 - `GET /api/orgs/{slug}/statements` lists uploads, and `GET …/statements/{id}` returns
   one with its transactions. `DELETE …/statements/{id}` deletes one.
@@ -148,7 +169,7 @@ dependencies). Notes:
 - `GET/POST /api/statements/google/spreadsheets`, `GET …/{id}`, and `POST …/{id}/tabs`
   are the POC's pickers.
 - `POST /api/orgs/{slug}/statements/{id}/sheet` with `{spreadsheet_id, tab}` builds the
-  statement from the stored rows and appends it through core. It returns parsed, skipped
+  statement from every row linked to the upload (in file order) and appends it through core. It returns parsed, skipped
   and appended counts.
 - Frontend: an "Add to Google Sheet" panel on the upload page, with the pickers ported
   from the POC.
