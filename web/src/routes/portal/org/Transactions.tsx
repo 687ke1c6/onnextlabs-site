@@ -97,11 +97,8 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
   },
 ];
 
-/**
- * The sum of Amount over the filtered rows, per currency (money in and out in its tooltip).
- * Only while a filter or search is on: unfiltered, it would just be the account's whole history.
- */
-function FilteredSum(props: { rows: OrgTransaction[] }) {
+/** The sum of Amount over the rows that pass the filters, per currency (in and out in its tooltip). */
+function AmountSum(props: { rows: OrgTransaction[] }) {
   const sums = createMemo(() => {
     const by = new Map<string, { in: number; out: number }>();
     for (const t of props.rows) {
@@ -202,11 +199,7 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
                   </div>
                 );
               }}
-              status={(shown, filtering) => (
-                <Show when={filtering && shown.length > 0}>
-                  <FilteredSum rows={shown} />
-                </Show>
-              )}
+              status={(shown) => <AmountSum rows={shown} />}
             />
           </Show>
         )}

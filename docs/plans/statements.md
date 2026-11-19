@@ -266,7 +266,7 @@ choice, not a column:
 
 Each grid ends in a status bar that sticks to the bottom of the window: the row count ("12 of 240
 rows"), the page's own figures, paging, and the Compact and Wide switches (moved from the toolbar).
-Transactions shows the **sum of Amount** for the filtered rows (per currency; money in and out in
-its tooltip) only while a filter or search is on. Uploads shows how many rows the listed statements
+Transactions shows the **sum of Amount** for the rows that pass the filters (all rows when none
+are on), per currency, with money in and out in its tooltip. Uploads shows how many rows the listed statements
 hold. The separate summary line under the toolbar is gone; the multi-column sort hint is now the
 header buttons' tooltip.
