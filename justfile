@@ -57,12 +57,12 @@ fmt:
 # fmt check, clippy, and typecheck
 check:
     cargo fmt --check
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
     cd web && bunx tsc --noEmit
 
 # run rust tests
 test:
-    cargo test
+    cargo test --workspace
 
 # build the docker image
 docker-build:

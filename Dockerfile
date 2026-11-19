@@ -16,11 +16,16 @@ WORKDIR /app
 
 # Backend (cache dependencies with a stub main)
 COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs \
-    && cargo build --release && rm -rf src target/release/onnextlabs-site*
+COPY crates/statements-core/Cargo.toml crates/statements-core/
+RUN mkdir src crates/statements-core/src && echo "fn main() {}" > src/main.rs \
+    && touch crates/statements-core/src/lib.rs \
+    && cargo build --release && rm -rf src crates/statements-core/src \
+       target/release/onnextlabs-site* target/release/deps/*statements_core* \
+       target/release/.fingerprint/statements-core-*
 COPY migrations migrations
+COPY crates crates
 COPY src src
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs crates/statements-core/src/lib.rs && cargo build --release
 
 # ---- Stage 3: minimal runtime ----
 FROM alpine:3.20
