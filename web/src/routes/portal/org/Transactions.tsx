@@ -178,7 +178,7 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
             <DataGrid
               rows={data.rows}
               columns={columns}
-              initialSorting={[{ id: "date", desc: true }]}
+              initialSorting={[{ id: "date", desc: false }]}
               search={(t, q) => [t.description, t.type ?? "", t.amount, t.month].some((v) => v.toLowerCase().includes(q))}
               searchPlaceholder="Search description, type, amount, month"
               storageKey="statements-grid-columns"
