@@ -365,11 +365,11 @@ async fn store(
         .await?;
         let row_id = match existing {
             Some(id) => {
-                // A blank type never replaces a stored one.
+                // A hand-set type is never changed; otherwise a blank never replaces a type.
                 sqlx::query(
                     "UPDATE statement_transactions
                      SET date = ?, amount = ?, description = ?, currency = ?,
-                         type = coalesce(?, type),
+                         type = CASE WHEN type_manual = 1 THEN type ELSE coalesce(?, type) END,
                          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                      WHERE id = ?",
                 )
@@ -588,6 +588,8 @@ pub async fn upload_detail(
 /// A stored row with where it came from, for the org-wide transactions grid.
 #[derive(Serialize, sqlx::FromRow)]
 struct OrgTransaction {
+    /// The row's own id (for editing it); `txn_id` is the n8n id.
+    id: i64,
     txn_id: i64,
     account_number: String,
     date: String,
@@ -600,6 +602,10 @@ struct OrgTransaction {
     #[serde(rename = "type")]
     #[sqlx(rename = "type")]
     category: Option<String>,
+    /// The type was picked by hand: saving a statement won't change it.
+    type_manual: bool,
+    /// Documents attached to the row.
+    attachments: i64,
     updated_at: String,
     /// The most recent upload containing it (rows always belong to at least one).
     upload_id: Option<i64>,
@@ -628,7 +634,10 @@ async fn org_transactions(
     account: Option<&str>,
 ) -> sqlx::Result<Vec<OrgTransaction>> {
     sqlx::query_as(
-        "SELECT t.txn_id, t.account_number, t.date, t.amount, t.description, t.currency, t.type,
+        "SELECT t.id, t.txn_id, t.account_number, t.date, t.amount, t.description, t.currency, t.type,
+                t.type_manual,
+                (SELECT count(*) FROM statement_transaction_documents d WHERE d.transaction_id = t.id)
+                    AS attachments,
                 t.updated_at, u.id AS upload_id, u.filename AS upload_filename
          FROM statement_transactions t
          LEFT JOIN statement_uploads u ON u.id = (
@@ -865,6 +874,19 @@ async fn put_rules(
 ) -> Result<Json<RulesResponse>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     validate_rules(&body.rules)?;
+    let mut body = body;
+    for (i, r) in body.rules.iter_mut().enumerate() {
+        r.category = crate::statement_types::canonical_name(&state.db, org.id, &r.category)
+            .await
+            .map_err(db_error)?
+            .ok_or_else(|| {
+                bad_request(&format!(
+                    "Rule {}: {:?} isn't on the types list. Add it first.",
+                    i + 1,
+                    r.category.trim()
+                ))
+            })?;
+    }
     let save = async {
         let mut tx = state.db.begin().await?;
         sqlx::query("DELETE FROM statement_type_rules WHERE org_id = ?")
@@ -1110,6 +1132,60 @@ mod tests {
             .iter()
             .all(|t| t.category.as_deref() != Some("PAYMENT")));
         assert!(after.iter().any(|t| t.category.as_deref() == Some("PAID")));
+    }
+
+    #[tokio::test]
+    async fn hand_set_types_survive_saves_and_cleared_ones_are_typed_again() {
+        let (db, org, user) = test_db().await;
+        let typed = parsed(&[rule("PAYMENT", &["PAYMENT"])]);
+        let first = store(&db, &org, user, "a.csv", "x", &typed, None)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        let paid = rows
+            .iter()
+            .find(|r| r.category.as_deref() == Some("PAYMENT"))
+            .unwrap();
+        let other = rows.iter().find(|r| r.category.is_none()).unwrap();
+
+        // By hand: one gets a different type, the other one too.
+        assert!(
+            crate::statement_types::set_type(&db, org.id, paid.id, Some("MINE"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::statement_types::set_type(&db, org.id, other.id, Some("ALSO MINE"))
+                .await
+                .unwrap()
+        );
+        store(&db, &org, user, "a.csv", "x", &typed, None)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        let by_id = |id| rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(by_id(paid.id).category.as_deref(), Some("MINE"));
+        assert!(by_id(paid.id).type_manual);
+        assert_eq!(by_id(other.id).category.as_deref(), Some("ALSO MINE"));
+
+        // Cleared by hand: no longer hand-set, so the next save types it from the rules.
+        crate::statement_types::set_type(&db, org.id, paid.id, None)
+            .await
+            .unwrap();
+        store(&db, &org, user, "a.csv", "x", &typed, None)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        let row = rows.iter().find(|r| r.id == paid.id).unwrap();
+        assert_eq!(row.category.as_deref(), Some("PAYMENT"));
+        assert!(!row.type_manual);
+        // Another org's row can't be touched.
+        assert!(
+            !crate::statement_types::set_type(&db, org.id + 1, paid.id, Some("X"))
+                .await
+                .unwrap()
+        );
+        let _ = first;
     }
 
     #[tokio::test]

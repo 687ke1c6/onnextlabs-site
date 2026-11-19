@@ -11,6 +11,7 @@ mod documents;
 mod orgs;
 mod rate_limit;
 mod rbac;
+mod statement_types;
 mod statements;
 mod statements_google;
 mod storage;
@@ -296,6 +297,7 @@ async fn main() {
         .merge(documents::routes(max_upload_bytes))
         .merge(statements::routes(max_upload_bytes))
         .merge(statements_google::routes())
+        .merge(statement_types::routes())
         // Unknown API paths get a JSON 404 rather than the SPA's index.html.
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(spa)

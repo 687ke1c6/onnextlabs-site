@@ -2,12 +2,24 @@ import { createEffect, createResource, createSignal, For, Index, type JSX, on, S
 import ArrowDown from "lucide-solid/icons/arrow-down";
 import ArrowUp from "lucide-solid/icons/arrow-up";
 import Loader2 from "lucide-solid/icons/loader-circle";
+import Pencil from "lucide-solid/icons/pencil";
 import Plus from "lucide-solid/icons/plus";
 import Trash from "lucide-solid/icons/trash";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { can } from "~/lib/orgs";
-import { fetchRules, type FormatInfo, type Rule, saveRules, testRules } from "~/lib/statements";
+import {
+  createType,
+  deleteType,
+  fetchRules,
+  fetchTypes,
+  type FormatInfo,
+  renameType,
+  type Rule,
+  saveRules,
+  testRules,
+  type TypeInfo,
+} from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
@@ -46,6 +58,8 @@ function RuleCard(props: {
   draft: Draft;
   count: number;
   formats: FormatInfo[];
+  /** Type names on the org's list. */
+  types: string[];
   editable: boolean;
   matched: boolean;
   onChange: (d: Draft) => void;
@@ -85,14 +99,22 @@ function RuleCard(props: {
       <div class="mt-3 grid gap-3 md:grid-cols-[minmax(0,12rem)_minmax(0,1fr)]">
         <div class="flex flex-col gap-1.5">
           <label for={id("type")} class="text-xs text-muted-foreground">Type</label>
-          <Input
+          <select
             id={id("type")}
-            class={FIELD}
             value={props.draft.type}
-            onInput={(e) => set({ type: e.currentTarget.value })}
+            onChange={(e) => set({ type: e.currentTarget.value })}
             disabled={!props.editable}
-            placeholder="e.g. FEES"
-          />
+            class="h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          >
+            <option value="" disabled>
+              Choose a type
+            </option>
+            {/* A name that isn't on the list any more still shows, so it can be changed. */}
+            <Show when={props.draft.type && !props.types.includes(props.draft.type)}>
+              <option value={props.draft.type}>{props.draft.type} (not on the list)</option>
+            </Show>
+            <For each={props.types}>{(t) => <option value={t}>{t}</option>}</For>
+          </select>
         </div>
         <div class="flex flex-col gap-1.5">
           <label for={id("contains")} class="text-xs text-muted-foreground">
@@ -226,6 +248,144 @@ function TestBox(props: { rules: () => Rule[]; onMatch: (index: number | null) =
   );
 }
 
+/** The org's types: add, rename (everywhere), delete (only when unused). */
+function TypesList(props: {
+  types: TypeInfo[] | undefined;
+  error: unknown;
+  editable: boolean;
+  onChange: (types: TypeInfo[]) => void;
+  onRenamed: (from: string, to: string) => void;
+}) {
+  const org = useOrg();
+  const [adding, setAdding] = createSignal("");
+  const [editing, setEditing] = createSignal<number | null>(null);
+  const [name, setName] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const run = async (fn: () => Promise<TypeInfo[]>, fallback: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      props.onChange(await fn());
+      return true;
+    } catch (e) {
+      setError(errorText(e, fallback));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const add = async (e: SubmitEvent) => {
+    e.preventDefault();
+    if (adding().trim() && (await run(() => createType(org.slug, adding()), "Couldn't add the type."))) setAdding("");
+  };
+  const rename = async (e: SubmitEvent, t: TypeInfo) => {
+    e.preventDefault();
+    const to = name().trim();
+    if (!to || to === t.name) return setEditing(null);
+    if (await run(() => renameType(org.slug, t.id, to), "Couldn't rename the type.")) {
+      props.onRenamed(t.name, to);
+      setEditing(null);
+    }
+  };
+  const remove = (t: TypeInfo) => run(() => deleteType(org.slug, t.id), "Couldn't delete the type.");
+  const uses = (t: TypeInfo) =>
+    [t.rows && `${t.rows} ${t.rows === 1 ? "row" : "rows"}`, t.rules && `${t.rules} ${t.rules === 1 ? "rule" : "rules"}`]
+      .filter(Boolean)
+      .join(", ") || "unused";
+
+  return (
+    <section class="rounded-xl border border-border p-4">
+      <h2 class="text-sm font-medium">Types</h2>
+      <p class="mt-1 text-xs text-muted-foreground">
+        The types rows can have. Rules and the Transactions grid choose from this list. Renaming a type renames it on every row and rule.
+      </p>
+      <Show when={props.error}>
+        <p class="mt-3 text-sm text-red-500">{errorText(props.error, "Couldn't load the types.")}</p>
+      </Show>
+      <Show when={props.types}>
+        {(list) => (
+          <ul class="mt-3 flex flex-wrap gap-2">
+            <For each={list()} fallback={<li class="text-sm text-muted-foreground">No types yet.</li>}>
+              {(t) => (
+                <li class="flex items-center gap-1 rounded-full border border-border bg-secondary/30 py-0.5 pl-3 pr-1 text-sm">
+                  <Show
+                    when={editing() === t.id}
+                    fallback={
+                      <>
+                        <span class="font-medium">{t.name}</span>
+                        <span class="text-xs text-muted-foreground">· {uses(t)}</span>
+                        <Show when={props.editable}>
+                          <IconButton
+                            label={`Rename ${t.name}`}
+                            onClick={() => {
+                              setName(t.name);
+                              setEditing(t.id);
+                            }}
+                          >
+                            <Pencil size={14} />
+                          </IconButton>
+                          <IconButton
+                            label={t.rows || t.rules ? `${t.name} is in use, so it can't be deleted` : `Delete ${t.name}`}
+                            onClick={() => void remove(t)}
+                            disabled={busy() || t.rows + t.rules > 0}
+                            danger
+                          >
+                            <Trash size={14} />
+                          </IconButton>
+                        </Show>
+                      </>
+                    }
+                  >
+                    <form onSubmit={(e) => void rename(e, t)} class="flex items-center gap-1">
+                      <Input
+                        class="h-7 w-40"
+                        value={name()}
+                        onInput={(e) => setName(e.currentTarget.value)}
+                        onKeyDown={(e) => e.key === "Escape" && setEditing(null)}
+                        maxLength={100}
+                        aria-label={`New name for ${t.name}`}
+                        ref={(el) => queueMicrotask(() => el.select())}
+                        disabled={busy()}
+                      />
+                      <Button type="submit" size="sm" class="h-7" disabled={busy()}>
+                        Save
+                      </Button>
+                      <Button type="button" variant="ghost" size="sm" class="h-7" onClick={() => setEditing(null)}>
+                        Cancel
+                      </Button>
+                    </form>
+                  </Show>
+                </li>
+              )}
+            </For>
+          </ul>
+        )}
+      </Show>
+      <Show when={props.editable}>
+        <form onSubmit={(e) => void add(e)} class="mt-3 flex max-w-sm gap-2">
+          <Input
+            class="h-9"
+            value={adding()}
+            onInput={(e) => setAdding(e.currentTarget.value)}
+            placeholder="New type, e.g. FEES"
+            maxLength={100}
+            aria-label="New type"
+            disabled={busy()}
+          />
+          <Button type="submit" size="sm" variant="outline" disabled={busy() || !adding().trim()}>
+            <Plus size={16} /> Add
+          </Button>
+        </form>
+      </Show>
+      <Show when={error()}>
+        <p role="alert" class="mt-2 text-sm text-red-500">{error()}</p>
+      </Show>
+    </section>
+  );
+}
+
 function RulesEditor() {
   const org = useOrg();
   const editable = () => can(org, "write-statements");
@@ -236,6 +396,14 @@ function RulesEditor() {
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const [matched, setMatched] = createSignal<number | null>(null);
+  const [types, { mutate: setTypes }] = createResource(() => org.slug, fetchTypes);
+  const typeNames = () => (settled(types) ?? []).map((t) => t.name);
+  // A rename also renames the type in rules (saved and unsaved), as the server does for saved ones.
+  const renamed = (from: string, to: string) => {
+    const swap = (list: Draft[]) => list.map((d) => (d.type === from ? { ...d, type: to } : d));
+    setDrafts(swap);
+    setSaved((json) => JSON.stringify(swap(JSON.parse(json) as Draft[])));
+  };
 
   createEffect(
     on(
@@ -250,6 +418,7 @@ function RulesEditor() {
 
   const dirty = () => JSON.stringify(drafts()) !== saved();
   const rules = () => drafts().map(toRule);
+  const missingType = () => drafts().findIndex((d) => !d.type);
   const invalidAmount = () =>
     drafts().findIndex((d) => [d.min, d.max].some((v) => v.trim() !== "" && !Number.isFinite(Number(v.trim()))));
 
@@ -275,6 +444,11 @@ function RulesEditor() {
   const save = async () => {
     setError(null);
     setNotice(null);
+    const untyped = missingType();
+    if (untyped >= 0) {
+      setError(`Rule ${untyped + 1}: choose a type.`);
+      return;
+    }
     const bad = invalidAmount();
     if (bad >= 0) {
       setError(`Rule ${bad + 1}: amounts must be numbers.`);
@@ -294,6 +468,14 @@ function RulesEditor() {
 
   return (
     <div class="mt-6 flex flex-col gap-6">
+      <TypesList
+        types={settled(types)}
+        error={types.error}
+        editable={editable()}
+        onChange={(list) => setTypes(list)}
+        onRenamed={renamed}
+      />
+
       <p class="max-w-3xl text-sm text-muted-foreground">
         Rules set each row's <span class="font-medium text-foreground">type</span> when a statement is saved. They're tried in order and
         the first match wins. A row no rule matches keeps the type it already had. To apply changed rules to rows already saved, save
@@ -325,6 +507,7 @@ function RulesEditor() {
                       draft={d()}
                       count={drafts().length}
                       formats={data().formats}
+                      types={typeNames()}
                       editable={editable()}
                       matched={matched() === i}
                       onChange={(nd) => update(i, nd)}

@@ -1,8 +1,9 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createContext, createMemo, createResource, createSignal, For, Show, useContext } from "solid-js";
 import { Link } from "@tanstack/solid-router";
 import type { ColumnDef } from "@tanstack/solid-table";
 import Check from "lucide-solid/icons/check";
 import ChevronUp from "lucide-solid/icons/chevron-up";
+import Hand from "lucide-solid/icons/hand";
 import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Menu, menuItemClass, useMenu } from "~/components/ui/menu";
 import { can } from "~/lib/orgs";
@@ -10,10 +11,12 @@ import {
   accountLabel,
   amountValue,
   fetchOrgTransactions,
+  fetchTypes,
   formatAmount,
   formatDate,
   isNegative,
   type OrgTransaction,
+  setRowType,
 } from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
@@ -74,15 +77,9 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
     id: "type",
     accessorFn: (t) => t.type ?? "",
     header: "Type",
-    cell: (c) => (
-      <Show when={c.row.original.type} fallback={<span class="text-muted-foreground">—</span>}>
-        <span class="whitespace-nowrap rounded-full border border-border bg-secondary/40 px-2 py-0.5 text-xs font-medium">
-          {c.row.original.type}
-        </span>
-      </Show>
-    ),
+    cell: (c) => <TypeCell row={c.row.original} />,
     filterFn: pickFilter,
-    meta: { width: "w-40", pick: { options: (rows) => distinct(rows, (r) => r.type), emptyLabel: "No type" } } satisfies Meta,
+    meta: { width: "w-44", pick: { options: (rows) => distinct(rows, (r) => r.type), emptyLabel: "No type" } } satisfies Meta,
   },
   {
     accessorKey: "txn_id",
@@ -97,6 +94,74 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
     meta: { width: "w-32" } satisfies Meta,
   },
 ];
+
+/** What the Type cells need from the page: the types list and how to save a change. */
+type RowEditing = {
+  canEdit: boolean;
+  types: () => string[];
+  setType: (row: OrgTransaction, type: string | null) => Promise<void>;
+};
+const RowEditingContext = createContext<RowEditing>();
+
+/** A row's type: a dropdown of the org's types for editors, a label for everyone else. */
+function TypeCell(props: { row: OrgTransaction }) {
+  const edit = useContext(RowEditingContext);
+  const [busy, setBusy] = createSignal(false);
+  const manual = () =>
+    props.row.type_manual && (
+      <span title="Set by hand: saving a statement won't change it" class="shrink-0 text-muted-foreground">
+        <Hand size={11} />
+      </span>
+    );
+  return (
+    <Show
+      when={edit?.canEdit}
+      fallback={
+        <span class="inline-flex items-center gap-1">
+          <Show when={props.row.type} fallback={<span class="text-muted-foreground">—</span>}>
+            <span class="whitespace-nowrap rounded-full border border-border bg-secondary/40 px-2 py-0.5 text-xs font-medium">
+              {props.row.type}
+            </span>
+          </Show>
+          {manual()}
+        </span>
+      }
+    >
+      <span class="inline-flex w-full items-center gap-1">
+        <select
+          value={props.row.type ?? ""}
+          disabled={busy()}
+          onClick={(e) => e.stopPropagation()}
+          onChange={async (e) => {
+            const select = e.currentTarget;
+            setBusy(true);
+            try {
+              await edit!.setType(props.row, select.value || null);
+            } catch {
+              select.value = props.row.type ?? ""; // put it back; the page shows the error
+            } finally {
+              setBusy(false);
+            }
+          }}
+          aria-label="Type"
+          title={props.row.type_manual ? "Set by hand" : props.row.type ? "Set by a type rule" : "No type"}
+          class={cn(
+            "h-7 min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 text-xs hover:border-input focus:border-input focus:outline-none disabled:opacity-50",
+            props.row.type ? "font-medium" : "text-muted-foreground",
+          )}
+        >
+          <option value="">—</option>
+          {/* A name no longer on the list still shows, so the row reads right. */}
+          <Show when={props.row.type && !edit!.types().includes(props.row.type)}>
+            <option value={props.row.type!}>{props.row.type}</option>
+          </Show>
+          <For each={edit!.types()}>{(t) => <option value={t}>{t}</option>}</For>
+        </select>
+        {manual()}
+      </span>
+    </Show>
+  );
+}
 
 type Stat = "sum" | "average" | "min" | "max";
 const STATS: { id: Stat; label: string }[] = [
@@ -225,7 +290,7 @@ function NoTransactions() {
 function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> }) {
   const org = useOrg();
   // Each result carries its account, so rows from the previous account never show under the new one.
-  const [rows] = createResource(
+  const [rows, { mutate }] = createResource(
     () => {
       const a = props.acct.account();
       return a ? { account: a.number } : undefined;
@@ -238,6 +303,31 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
     return data && a && data.account === a.number ? data : undefined;
   };
   const error = () => rows.error ?? props.acct.accounts.error;
+  // Rebuilt only when the account changes, so editing a row keeps filters, sorting and page.
+  const gridKey = createMemo(() => (current() ? `account:${current()!.account}` : undefined));
+
+  const [types, { refetch: refetchTypes }] = createResource(() => org.slug, fetchTypes);
+  const [editError, setEditError] = createSignal<string | null>(null);
+  const editing: RowEditing = {
+    canEdit: can(org, "write-statements"),
+    types: () => (settled(types) ?? []).map((t) => t.name),
+    setType: async (row, type) => {
+      setEditError(null);
+      try {
+        const saved = await setRowType(org.slug, row.id, type);
+        mutate((d) =>
+          d && {
+            ...d,
+            rows: d.rows.map((r) => (r.id === row.id ? { ...r, type: saved.type, type_manual: saved.type_manual } : r)),
+          },
+        );
+      } catch (e) {
+        setEditError(e instanceof Error ? e.message : "Couldn't change the type.");
+        void refetchTypes(); // e.g. the type was renamed or deleted meanwhile
+        throw e;
+      }
+    },
+  };
 
   return (
     <div class="mt-6 flex min-h-0 flex-1 flex-col">
@@ -250,21 +340,26 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
       <Show when={props.acct.account() && !current() && !error()}>
         <div class="h-64 animate-pulse rounded-xl bg-secondary/40" />
       </Show>
-      {/* Keyed: a new account starts with fresh filters and paging. */}
-      <Show when={current()} keyed>
-        {(data) => (
-          <Show when={data.rows.length > 0} fallback={<NoTransactions />}>
-            <DataGrid
-              rows={data.rows}
-              columns={columns}
-              initialSorting={[{ id: "date", desc: false }]}
-              search={(t, q) => [t.description, t.type ?? "", t.amount, t.month].some((v) => v.toLowerCase().includes(q))}
-              searchPlaceholder="Search description, type, amount, month"
-              storageKey="statements-grid-columns"
-              defaultHidden={["currency", "txn_id", "updated_at"]}
-              noun={["row", "rows"]}
-              status={(shown) => <AmountStat rows={shown} />}
-            />
+      <Show when={editError()}>
+        <p role="alert" class="mb-2 text-sm text-red-500">{editError()}</p>
+      </Show>
+      {/* Keyed by account: a new account starts with fresh filters and paging. */}
+      <Show when={gridKey()} keyed>
+        {(_account) => (
+          <Show when={(current()?.rows.length ?? 0) > 0} fallback={<NoTransactions />}>
+            <RowEditingContext.Provider value={editing}>
+              <DataGrid
+                rows={current()?.rows ?? []}
+                columns={columns}
+                initialSorting={[{ id: "date", desc: false }]}
+                search={(t, q) => [t.description, t.type ?? "", t.amount, t.month].some((v) => v.toLowerCase().includes(q))}
+                searchPlaceholder="Search description, type, amount, month"
+                storageKey="statements-grid-columns"
+                defaultHidden={["currency", "txn_id", "updated_at"]}
+                noun={["row", "rows"]}
+                status={(shown) => <AmountStat rows={shown} />}
+              />
+            </RowEditingContext.Provider>
           </Show>
         )}
       </Show>

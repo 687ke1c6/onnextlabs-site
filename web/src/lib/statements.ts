@@ -152,6 +152,12 @@ export const isNegative = (amount: string) => amount.trim().startsWith("-");
 
 /** A stored row in the org, with the most recent upload that contained it. */
 export type OrgTransaction = Transaction & {
+  /** The row's own id (for editing); `txn_id` is the n8n id. */
+  id: number;
+  /** The type was picked by hand: saving a statement won't change it. */
+  type_manual: boolean;
+  /** Documents attached to the row. */
+  attachments: number;
   /** e.g. "Aug 2024": derived from `date`, as in the sheet's `month` column. */
   month: string;
   account_number: string;
@@ -166,3 +172,31 @@ export const fetchOrgTransactions = async (org: string, account: string) =>
 
 /** The amount as a number (the stored string is kept exactly as in the file). NaN if unreadable. */
 export const amountValue = (amount: string) => Number(amount.replace(/,/g, "").trim());
+
+// ---- types ----
+
+/** A type on the org's list, with how many rows and rules use it. */
+export type TypeInfo = { id: number; name: string; rows: number; rules: number };
+
+const types = (org: string) => `${base(org)}/statement-types`;
+
+export const fetchTypes = async (org: string) => json<TypeInfo[]>(await fetch(types(org)), "Couldn't load the types.");
+
+export const createType = async (org: string, name: string) =>
+  json<TypeInfo[]>(await send("POST", types(org), { name }), "Couldn't add the type.");
+
+/** Renames it on every row and rule too. */
+export const renameType = async (org: string, id: number, name: string) =>
+  json<TypeInfo[]>(await send("PATCH", `${types(org)}/${id}`, { name }), "Couldn't rename the type.");
+
+/** Refused while a row or rule uses it. */
+export const deleteType = async (org: string, id: number) =>
+  json<TypeInfo[]>(await send("DELETE", `${types(org)}/${id}`), "Couldn't delete the type.");
+
+/** Sets a row's type by hand (or clears it with null, so saved statements can type it again). */
+export const setRowType = async (org: string, row: number, type: string | null) =>
+  json<{ type: string | null; type_manual: boolean }>(
+    await send("PATCH", `${base(org)}/statement-transactions/${row}`, { type }),
+    "Couldn't change the type.",
+  );
+

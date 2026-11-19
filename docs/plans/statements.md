@@ -283,3 +283,18 @@ scrolls as before until the grid is in view. Other portal pages scroll normally.
 Status bar settings are all remembered per browser: the Compact and Wide toggle buttons (`grid-compact`,
 `grid-wide`), the Amount figure (`statements-amount-stat`), and rows per page for each grid
 (`<grid storage key>:page-size`). The bar itself is compact: 11px text, minimal padding.
+
+# Part 2: editable types, statement copies, row documents
+
+## Decisions
+
+| Topic | Decision |
+|---|---|
+| Types | A per-org **Types** list (`statement_types`, names unique ignoring case), managed on the Type rules tab. Rules pick their type from it; a row's type cell is a dropdown of it. New types are added on the list only, not from a row. The list starts with every type already used on rows or in rules. |
+| Rename / delete | Renaming a type renames it on every row and rule (one database transaction). Deleting a type in use is refused, saying where it's used. |
+| Editing a row's type | `write-statements`. Picking a type marks the row **hand-set** (`type_manual`): saving a statement never changes it. Clearing it makes the row blank and *not* hand-set, so the next save can set it from the rules again. Hand-set rows show a small marker. |
+| Bulk edit | Later. |
+| Statement copy | Required. Every saved statement is stored in Documents on the uploader's behalf (no `write-docs` needed), in the fixed folder `Statements/<account number>` (`Statements/No account` when the file states none). An identical file already in the org's Documents (same SHA-256) is reused instead of saved again. Older uploads without a copy are left as they are (none in production). |
+| Row documents | Many-to-many links between rows and existing Documents (`statement_transaction_documents`). Attaching or removing a link never touches the document; a link whose file is gone shows "File missing". Attach from existing Documents only (no upload here). Attaching or removing needs `write-statements` and `read-docs`; opening a private file needs `read-docs` as usual. |
+| Row panel | Clicking a row opens a side panel: details, type (editable), source statement(s) and their files, attached documents (open, remove, "Attach existing" with a searchable picker). A 📎 column shows each row's attachment count. |
+| Google Sheets | Unchanged. Types travel as before; attachments never go to sheets. |
