@@ -375,6 +375,12 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
                 noun={["row", "rows"]}
                 status={(shown) => <AmountStat rows={shown} />}
                 onRowClick={(r) => setOpenRow(r.id)}
+                // Rows with documents attached: a light blue tint and a thin bar on the left.
+                rowClass={(r) =>
+                  r.attachments > 0
+                    ? "bg-sky-500/[0.07] shadow-[inset_3px_0_0_var(--color-sky-500)] hover:bg-sky-500/[0.12]"
+                    : undefined
+                }
                 isSelected={(r) => r.id === openRow()}
               />
             </RowEditingContext.Provider>

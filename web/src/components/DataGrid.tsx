@@ -103,6 +103,8 @@ export function DataGrid<T>(props: {
   onRowClick?: (row: T) => void;
   /** Highlights a row, e.g. the one whose details are open. */
   isSelected?: (row: T) => boolean;
+  /** Extra classes for a row that isn't selected (background and hover), e.g. to mark rows with something attached. */
+  rowClass?: (row: T) => string | undefined;
 }) {
   const [sorting, setSorting] = createSignal<SortingState>(props.initialSorting ?? []);
   const [filters, setFilters] = createSignal<ColumnFiltersState>([]);
@@ -342,7 +344,7 @@ export function DataGrid<T>(props: {
                 <tr
                   class={cn(
                     "border-b border-border last:border-0",
-                    props.isSelected?.(row.original) ? "bg-accent/60" : "hover:bg-accent/30",
+                    props.isSelected?.(row.original) ? "bg-accent/60" : (props.rowClass?.(row.original) ?? "hover:bg-accent/30"),
                     props.onRowClick && "cursor-pointer",
                   )}
                   onClick={(e) => {
