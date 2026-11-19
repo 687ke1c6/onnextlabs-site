@@ -127,9 +127,11 @@ files you add to `data-dav/` by hand show up quickly.
 ### Statements
 Each organisation has a **Statements** section (`/portal/<slug>/statements`, needs
 `read-statements`). It opens on **Transactions**: every row saved for the organisation, in a
-grid you can search, filter (account, type, date range), sort (shift-click for more than one
-column) and page through, with totals for what's shown and a choice of columns. Under
-**Uploads**, someone with `write-statements` drops in a bank statement CSV (only Standard
+grid you can search, filter (month, account and type from their column headers, plus a date
+range), sort (shift-click for more than one column) and page through, with totals for what's
+shown and a choice of columns. `month` ("Aug 2024") is worked out from the date, exactly as
+the Google Sheet's `month` column is. **Uploads** lists the saved statement files in the same
+kind of grid, and there, someone with `write-statements` drops in a bank statement CSV (only Standard
 Bank CSV so far), checks the preview, and saves it. Saving stores every row in the database:
 
 - Each row's id is the n8n hash of its date, description and amount, the same id the

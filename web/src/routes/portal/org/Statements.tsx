@@ -4,7 +4,10 @@ import FileSpreadsheet from "lucide-solid/icons/file-spreadsheet";
 import Loader2 from "lucide-solid/icons/loader-circle";
 import UploadCloud from "lucide-solid/icons/cloud-upload";
 import X from "lucide-solid/icons/x";
+import type { ColumnDef } from "@tanstack/solid-table";
+import { DataGrid, dateRangeFilter, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
 import { fetchAllFolders } from "~/lib/documents";
 import { can } from "~/lib/orgs";
 import {
@@ -14,6 +17,7 @@ import {
   type Preview,
   previewStatement,
   saveStatement,
+  type UploadSummary,
 } from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
@@ -234,60 +238,126 @@ function UploadPanel() {
   );
 }
 
+type UploadMeta = GridColumnMeta<UploadSummary>;
+
+function UploadLink(props: { upload: UploadSummary }) {
+  const org = useOrg();
+  return (
+    <Link
+      to="/portal/$org/statements/$upload"
+      params={{ org: org.slug, upload: String(props.upload.id) }}
+      class="block max-w-[18rem] truncate font-medium underline-offset-2 hover:underline focus-visible:outline-none focus-visible:underline"
+      title={props.upload.filename}
+    >
+      {props.upload.filename}
+    </Link>
+  );
+}
+
+const uploadColumns: ColumnDef<UploadSummary, any>[] = [
+  {
+    accessorKey: "filename",
+    header: "File",
+    cell: (c) => <UploadLink upload={c.row.original} />,
+    enableHiding: false,
+  },
+  {
+    accessorKey: "account_number",
+    header: "Account",
+    cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{c.getValue<string>() || "—"}</span>,
+    filterFn: pickFilter,
+    meta: {
+      width: "w-36",
+      pick: { options: (rows) => distinct(rows, (u) => u.account_number), emptyLabel: "No account" },
+    } satisfies UploadMeta,
+  },
+  {
+    id: "period",
+    accessorFn: (u) => u.first_date ?? "",
+    header: "Period",
+    cell: (c) => (
+      <span class="whitespace-nowrap text-muted-foreground">{formatPeriod(c.row.original.first_date, c.row.original.last_date)}</span>
+    ),
+    meta: { width: "w-56" } satisfies UploadMeta,
+  },
+  {
+    accessorKey: "rows_parsed",
+    header: "Rows",
+    cell: (c) => <span class="tabular-nums">{c.getValue<number>()}</span>,
+    meta: { width: "w-20", align: "right" } satisfies UploadMeta,
+  },
+  {
+    accessorKey: "rows_new",
+    header: "New",
+    cell: (c) => <span class="tabular-nums text-muted-foreground">{c.getValue<number>()}</span>,
+    meta: { width: "w-20", align: "right", label: "New rows" } satisfies UploadMeta,
+  },
+  {
+    accessorKey: "rows_updated",
+    header: "Updated",
+    cell: (c) => <span class="tabular-nums text-muted-foreground">{c.getValue<number>()}</span>,
+    meta: { width: "w-24", align: "right", label: "Already saved rows" } satisfies UploadMeta,
+  },
+  {
+    id: "uploaded_by",
+    accessorFn: (u) => u.uploaded_by ?? "",
+    header: "Saved by",
+    cell: (c) => <span class="truncate text-muted-foreground">{c.row.original.uploaded_by ?? "—"}</span>,
+    filterFn: pickFilter,
+    meta: {
+      width: "w-40",
+      pick: { options: (rows) => distinct(rows, (u) => u.uploaded_by), emptyLabel: "Unknown" },
+    } satisfies UploadMeta,
+  },
+  {
+    accessorKey: "uploaded_at",
+    header: "Saved",
+    cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{formatDate(c.getValue<string>())}</span>,
+    filterFn: dateRangeFilter,
+    meta: { width: "w-32" } satisfies UploadMeta,
+  },
+];
+
 function UploadsList() {
   const org = useOrg();
   const [uploads] = createResource(() => org.slug, fetchUploads);
 
   return (
     <section class="mt-8">
-      <h2 class="text-sm font-medium">Saved statements</h2>
+      <h2 class="mb-3 text-sm font-medium">Saved statements</h2>
       <Show when={uploads.error}>
-        <p class="mt-3 text-sm text-red-500">{errorText(uploads.error, "Couldn't load statements.")}</p>
+        <p class="text-sm text-red-500">{errorText(uploads.error, "Couldn't load statements.")}</p>
       </Show>
       <Show when={settled(uploads)?.length === 0}>
-        <p class="mt-3 rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
+        <p class="rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
           No statements saved yet.
         </p>
       </Show>
-      <Show when={settled(uploads)?.length}>
-        <div class="mt-3 overflow-x-auto rounded-xl border border-border">
-          <table class="w-full min-w-[40rem] text-sm">
-            <thead class="border-b border-border bg-secondary/30 text-left text-xs text-muted-foreground">
-              <tr>
-                <th class="px-4 py-2.5 font-medium">File</th>
-                <th class="px-4 py-2.5 font-medium">Account</th>
-                <th class="px-4 py-2.5 font-medium">Period</th>
-                <th class="px-4 py-2.5 text-right font-medium">Rows</th>
-                <th class="hidden px-4 py-2.5 font-medium md:table-cell">Saved by</th>
-                <th class="px-4 py-2.5 font-medium">Saved</th>
-              </tr>
-            </thead>
-            <tbody>
-              <For each={settled(uploads)}>
-                {(u) => (
-                  <tr class="border-b border-border last:border-0 hover:bg-accent/40">
-                    <td class="max-w-[16rem] px-4 py-0">
-                      <Link
-                        to="/portal/$org/statements/$upload"
-                        params={{ org: org.slug, upload: String(u.id) }}
-                        class="block truncate py-3 font-medium focus-visible:outline-none focus-visible:underline"
-                      >
-                        {u.filename}
-                      </Link>
-                    </td>
-                    <td class="px-4 py-3 text-muted-foreground">{u.account_number || "—"}</td>
-                    <td class="whitespace-nowrap px-4 py-3 text-muted-foreground">{formatPeriod(u.first_date, u.last_date)}</td>
-                    <td class="px-4 py-3 text-right tabular-nums" title={`${u.rows_new} new, ${u.rows_updated} already saved`}>
-                      {u.rows_parsed}
-                    </td>
-                    <td class="hidden truncate px-4 py-3 text-muted-foreground md:table-cell">{u.uploaded_by ?? "—"}</td>
-                    <td class="whitespace-nowrap px-4 py-3 text-muted-foreground">{formatDate(u.uploaded_at)}</td>
-                  </tr>
-                )}
-              </For>
-            </tbody>
-          </table>
-        </div>
+      <Show when={settled(uploads)?.length ? settled(uploads) : undefined}>
+        {(list) => (
+          <DataGrid
+            rows={list()}
+            columns={uploadColumns}
+            initialSorting={[{ id: "uploaded_at", desc: true }]}
+            search={(u, q) => [u.filename, u.account_number, u.uploaded_by ?? ""].some((v) => v.toLowerCase().includes(q))}
+            searchPlaceholder="Search file, account, who saved it"
+            storageKey="statements-uploads-columns"
+            defaultHidden={["rows_new", "rows_updated"]}
+            noun={["statement", "statements"]}
+            toolbar={(grid) => {
+              const range = () => grid.filterValue<[string, string]>("uploaded_at", ["", ""]);
+              const set = (from: string, to: string) => grid.setFilter("uploaded_at", from || to ? [from, to] : undefined);
+              return (
+                <div class="flex min-w-0 flex-[2_1_16rem] items-center gap-1" title="When the statement was saved">
+                  <Input type="date" class="h-9 min-w-0" value={range()[0]} onInput={(e) => set(e.currentTarget.value, range()[1])} aria-label="Saved from" />
+                  <span class="text-muted-foreground">–</span>
+                  <Input type="date" class="h-9 min-w-0" value={range()[1]} onInput={(e) => set(range()[0], e.currentTarget.value)} aria-label="Saved until" />
+                </div>
+              );
+            }}
+            summary={(shown) => <span>{shown.reduce((n, u) => n + u.rows_parsed, 0)} rows in these statements</span>}
+          />
+        )}
       </Show>
     </section>
   );

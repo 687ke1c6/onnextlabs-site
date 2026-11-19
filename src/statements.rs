@@ -29,6 +29,7 @@ use sqlx::SqlitePool;
 use statements_core::{
     categories::{categorise, CategoryRule},
     hash::DateFormat,
+    row::month_label,
     statement::{self, Format, Statement, Transaction},
 };
 
@@ -542,6 +543,9 @@ struct OrgTransaction {
     txn_id: i64,
     account_number: String,
     date: String,
+    /// e.g. "Aug 2024", derived from `date` exactly as the sheet's `month` column is.
+    #[sqlx(skip)]
+    month: String,
     amount: String,
     description: String,
     currency: String,
@@ -583,6 +587,12 @@ async fn org_transactions(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<OrgT
     .bind(org_id)
     .fetch_all(db)
     .await
+    .map(|mut rows: Vec<OrgTransaction>| {
+        for r in &mut rows {
+            r.month = month_label(&r.date);
+        }
+        rows
+    })
 }
 
 /// DELETE /api/orgs/{org}/statements/{id} — removes the upload and the rows no other upload
@@ -1094,6 +1104,8 @@ mod tests {
         let rows = org_transactions(&db, org.id).await.unwrap();
         assert_eq!(rows.len(), st.transactions.len());
         assert!(rows.iter().all(|r| r.upload_id == Some(second)));
+        let first = rows.iter().find(|r| r.date == "2027-12-29").unwrap();
+        assert_eq!(first.month, "Dec 2027");
         assert!(rows.windows(2).all(|w| w[0].date >= w[1].date));
         assert!(org_transactions(&db, org.id + 1).await.unwrap().is_empty());
     }

@@ -1,0 +1,478 @@
+import { createMemo, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
+import { Portal } from "solid-js/web";
+import {
+  type ColumnDef,
+  type ColumnFiltersState,
+  createSolidTable,
+  type FilterFn,
+  flexRender,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getPaginationRowModel,
+  getSortedRowModel,
+  type Row,
+  type SortingState,
+  type VisibilityState,
+} from "@tanstack/solid-table";
+import ArrowDown from "lucide-solid/icons/arrow-down";
+import ArrowUp from "lucide-solid/icons/arrow-up";
+import ArrowUpDown from "lucide-solid/icons/arrow-up-down";
+import Check from "lucide-solid/icons/check";
+import ChevronLeft from "lucide-solid/icons/chevron-left";
+import ChevronRight from "lucide-solid/icons/chevron-right";
+import Columns3 from "lucide-solid/icons/columns-3";
+import Funnel from "lucide-solid/icons/funnel";
+import Search from "lucide-solid/icons/search";
+import X from "lucide-solid/icons/x";
+import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
+import { Menu, menuItemClass, MenuSeparator } from "~/components/ui/menu";
+import { cn } from "~/lib/utils";
+
+/** Header filter value meaning "rows where this column is empty". */
+export const EMPTY = "\u0000empty";
+const PAGE_SIZES = [25, 50, 100, 250];
+
+export const SELECT =
+  "h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+export type FilterOption = { value: string; label: string };
+
+/** Per-column settings, in `columnDef.meta`. */
+export type GridColumnMeta<T> = {
+  /** Tailwind width class for the column. */
+  width?: string;
+  align?: "right";
+  /** Name in the column picker (defaults to the header). */
+  label?: string;
+  /**
+   * A header filter: pick one value from these options (built from every row, so choosing one
+   * never hides the others). Compares against the column's value; `EMPTY` matches blanks.
+   * `emptyLabel` adds that choice.
+   */
+  pick?: { options: (rows: T[]) => FilterOption[]; emptyLabel?: string };
+};
+
+const meta = <T,>(m: unknown) => (m ?? {}) as GridColumnMeta<T>;
+
+/** Filter for `pick` columns. */
+// `any`: shared by every row type.
+export const pickFilter: FilterFn<any> = (row, id, value: string) => {
+  if (!value) return true;
+  const v = row.getValue<unknown>(id);
+  const text = v == null ? "" : String(v);
+  return value === EMPTY ? text === "" : text === value;
+};
+
+/** `[from, to]` (either may be empty) against a YYYY-MM-DD (or ISO timestamp) column. */
+// `any`: shared by every row type.
+export const dateRangeFilter: FilterFn<any> = (row, id, [from, to]: [string, string]) => {
+  const d = String(row.getValue(id) ?? "").slice(0, 10);
+  return (!from || d >= from) && (!to || d <= to);
+};
+
+/** Distinct non-empty values of `get`, as options, in `sort` order (alphabetical by default). */
+export function distinct<T>(rows: T[], get: (row: T) => string | null | undefined, sort?: (a: string, b: string) => number) {
+  const values = [...new Set(rows.map(get).filter((v): v is string => !!v))];
+  values.sort(sort ?? ((a, b) => a.localeCompare(b)));
+  return values.map((v) => ({ value: v, label: v }));
+}
+
+export type GridApi = {
+  filterValue: <V>(id: string, empty: V) => V;
+  setFilter: (id: string, value: unknown) => void;
+};
+
+export function DataGrid<T>(props: {
+  rows: T[];
+  columns: ColumnDef<T, any>[];
+  initialSorting?: SortingState;
+  /** Matches a row against the search box (lowercased query, never empty). */
+  search: (row: T, query: string) => boolean;
+  searchPlaceholder: string;
+  /** Remembers the column picker per browser under this key. */
+  storageKey: string;
+  /** Columns hidden until the user shows them. */
+  defaultHidden?: string[];
+  /** Extra toolbar controls (e.g. a date range), given access to the filters. */
+  toolbar?: (api: GridApi) => JSX.Element;
+  /** Under the toolbar: given the rows that pass the filters. */
+  summary?: (rows: T[]) => JSX.Element;
+  /** e.g. ["row", "rows"]. */
+  noun: [string, string];
+}) {
+  const [sorting, setSorting] = createSignal<SortingState>(props.initialSorting ?? []);
+  const [filters, setFilters] = createSignal<ColumnFiltersState>([]);
+  const [query, setQuery] = createSignal("");
+  const [visibility, setVisibility] = createSignal<VisibilityState>(initialVisibility(props.storageKey, props.defaultHidden ?? []));
+  const [pagination, setPagination] = createSignal({ pageIndex: 0, pageSize: 50 });
+  const firstPage = () => setPagination((p) => ({ ...p, pageIndex: 0 }));
+
+  const table = createSolidTable<T>({
+    get data() {
+      return props.rows;
+    },
+    get columns() {
+      return props.columns;
+    },
+    state: {
+      get sorting() {
+        return sorting();
+      },
+      get columnFilters() {
+        return filters();
+      },
+      get globalFilter() {
+        return query();
+      },
+      get columnVisibility() {
+        return visibility();
+      },
+      get pagination() {
+        return pagination();
+      },
+    },
+    onSortingChange: setSorting,
+    onColumnFiltersChange: (u) => {
+      setFilters(u);
+      firstPage();
+    },
+    onGlobalFilterChange: (u) => {
+      setQuery(u);
+      firstPage();
+    },
+    onColumnVisibilityChange: (u) => {
+      const next = typeof u === "function" ? u(visibility()) : u;
+      setVisibility(next);
+      try {
+        localStorage.setItem(props.storageKey, JSON.stringify(next));
+      } catch {
+        // storage blocked: just don't remember
+      }
+    },
+    onPaginationChange: setPagination,
+    globalFilterFn: (row: Row<T>, _id, value: string) => {
+      const q = value.trim().toLowerCase();
+      return !q || props.search(row.original, q);
+    },
+    enableMultiSort: true,
+    isMultiSortEvent: (e) => (e as MouseEvent).shiftKey,
+    getCoreRowModel: getCoreRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+  });
+
+  const api: GridApi = {
+    filterValue: <V,>(id: string, empty: V) => (filters().find((f) => f.id === id)?.value as V) ?? empty,
+    setFilter: (id, value) => table.getColumn(id)?.setFilterValue(value),
+  };
+
+  const filtered = () => table.getFilteredRowModel().rows.map((r) => r.original);
+  const anyFilter = () => !!query() || filters().length > 0;
+  const clearAll = () => {
+    setQuery("");
+    setFilters([]);
+    firstPage();
+  };
+  const count = (n: number) => `${n} ${n === 1 ? props.noun[0] : props.noun[1]}`;
+  const firstShown = () => (filtered().length === 0 ? 0 : pagination().pageIndex * pagination().pageSize + 1);
+  const lastShown = () => Math.min(filtered().length, (pagination().pageIndex + 1) * pagination().pageSize);
+
+  return (
+    <div class="flex flex-col gap-3">
+      {/* Toolbar */}
+      <div class="flex flex-wrap items-end gap-2">
+        <div class="relative min-w-0 flex-[2_1_14rem]">
+          <Search size={16} class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            class="h-9 pl-9"
+            value={query()}
+            onInput={(e) => table.setGlobalFilter(e.currentTarget.value)}
+            placeholder={props.searchPlaceholder}
+            aria-label="Search"
+          />
+        </div>
+        {props.toolbar?.(api)}
+        <Menu
+          label="Columns"
+          title="Show or hide columns"
+          trigger={
+            <>
+              <Columns3 size={16} /> Columns
+            </>
+          }
+          triggerClass="inline-flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          class="bottom-auto left-auto right-0 top-full mb-0 mt-1 w-48"
+        >
+          <For each={table.getAllLeafColumns().filter((c) => c.getCanHide())}>
+            {(col) => (
+              <label class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
+                <input type="checkbox" checked={col.getIsVisible()} onChange={col.getToggleVisibilityHandler()} class="h-4 w-4" />
+                {meta<T>(col.columnDef.meta).label ?? String(col.columnDef.header)}
+              </label>
+            )}
+          </For>
+        </Menu>
+        <Show when={anyFilter()}>
+          <Button variant="ghost" size="sm" onClick={clearAll}>
+            <X size={16} /> Clear
+          </Button>
+        </Show>
+      </div>
+
+      {/* What's shown */}
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        <span>{filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}</span>
+        {props.summary?.(filtered())}
+        <span class="hidden sm:inline">Shift-click headers to sort by more than one column.</span>
+      </div>
+
+      {/* Table */}
+      <div class="overflow-x-auto rounded-xl border border-border">
+        <table class="w-full min-w-[44rem] text-sm">
+          <thead class="border-b border-border bg-secondary/30 text-left text-xs text-muted-foreground">
+            <For each={table.getHeaderGroups()}>
+              {(group) => (
+                <tr>
+                  <For each={group.headers}>
+                    {(h) => {
+                      const m = meta<T>(h.column.columnDef.meta);
+                      const sorted = () => h.column.getIsSorted();
+                      return (
+                        <th
+                          class={cn("px-4 py-2 font-medium", m.width, m.align === "right" && "text-right")}
+                          aria-sort={sorted() === "asc" ? "ascending" : sorted() === "desc" ? "descending" : "none"}
+                        >
+                          <div class={cn("inline-flex items-center gap-1", m.align === "right" && "flex-row-reverse")}>
+                            <button
+                              type="button"
+                              onClick={h.column.getToggleSortingHandler()}
+                              class={cn(
+                                "inline-flex items-center gap-1 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                sorted() && "text-foreground",
+                              )}
+                            >
+                              {flexRender(h.column.columnDef.header, h.getContext()) as JSX.Element}
+                              <SortIcon dir={sorted()} index={h.column.getSortIndex()} multi={sorting().length > 1} />
+                            </button>
+                            <Show when={m.pick}>
+                              {(pick) => (
+                                <HeaderFilter
+                                  name={m.label ?? String(h.column.columnDef.header)}
+                                  options={pick().options(props.rows)}
+                                  emptyLabel={pick().emptyLabel}
+                                  value={api.filterValue(h.column.id, "")}
+                                  onChange={(v) => api.setFilter(h.column.id, v || undefined)}
+                                />
+                              )}
+                            </Show>
+                          </div>
+                        </th>
+                      );
+                    }}
+                  </For>
+                </tr>
+              )}
+            </For>
+          </thead>
+          <tbody>
+            <For
+              each={table.getRowModel().rows}
+              fallback={
+                <tr>
+                  <td colspan={table.getVisibleLeafColumns().length} class="px-4 py-10 text-center text-muted-foreground">
+                    Nothing matches.{" "}
+                    <button type="button" class="underline hover:text-foreground" onClick={clearAll}>
+                      Clear the filters
+                    </button>
+                  </td>
+                </tr>
+              }
+            >
+              {(row) => (
+                <tr class="border-b border-border last:border-0 hover:bg-accent/30">
+                  <For each={row.getVisibleCells()}>
+                    {(cell) => (
+                      <td class={cn("px-4 py-2 align-top", meta<T>(cell.column.columnDef.meta).align === "right" && "text-right")}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext()) as JSX.Element}
+                      </td>
+                    )}
+                  </For>
+                </tr>
+              )}
+            </For>
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
+        <label class="flex items-center gap-2 text-muted-foreground">
+          Per page
+          <select class={cn(SELECT, "h-8 px-2")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
+            <For each={PAGE_SIZES}>{(n) => <option value={n}>{n}</option>}</For>
+          </select>
+        </label>
+        <div class="flex items-center gap-2">
+          <span class="tabular-nums text-muted-foreground">
+            {firstShown()}–{lastShown()} of {filtered().length}
+          </span>
+          <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} aria-label="Previous page">
+            <ChevronLeft size={16} />
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} aria-label="Next page">
+            <ChevronRight size={16} />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function initialVisibility(key: string, hidden: string[]): VisibilityState {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) ?? "null");
+    if (saved && typeof saved === "object") return saved;
+  } catch {
+    // fall back to the defaults
+  }
+  return Object.fromEntries(hidden.map((id) => [id, false]));
+}
+
+function SortIcon(props: { dir: false | "asc" | "desc"; index: number; multi: boolean }) {
+  return (
+    <span class="inline-flex items-center">
+      <Show when={props.dir} fallback={<ArrowUpDown size={12} class="opacity-40" />}>
+        <Show when={props.dir === "asc"} fallback={<ArrowDown size={12} />}>
+          <ArrowUp size={12} />
+        </Show>
+        <Show when={props.multi && props.index >= 0}>
+          <span class="ml-0.5 text-[10px]">{props.index + 1}</span>
+        </Show>
+      </Show>
+    </span>
+  );
+}
+
+/**
+ * Funnel button in a column header: a popover to pick one value (or all, or blank).
+ * Positioned against the viewport in a portal, so the table's scroll box can't clip it.
+ */
+function HeaderFilter(props: {
+  name: string;
+  options: FilterOption[];
+  emptyLabel?: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [pos, setPos] = createSignal<{ top: number; left: number } | null>(null);
+  let button!: HTMLButtonElement;
+  let panel: HTMLDivElement | undefined;
+
+  const items = () => Array.from(panel?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? []);
+  const close = (refocus = false) => {
+    setPos(null);
+    if (refocus) button.focus();
+  };
+  const open = () => {
+    const r = button.getBoundingClientRect();
+    const width = 224;
+    setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left, window.innerWidth - width - 8)) });
+    queueMicrotask(() => (items().find((el) => el.getAttribute("aria-checked") === "true") ?? items()[0])?.focus());
+  };
+  const choose = (v: string) => {
+    props.onChange(v);
+    close(true);
+  };
+
+  const onPointerDown = (e: PointerEvent) => {
+    const t = e.target as Node;
+    if (pos() && !panel?.contains(t) && !button.contains(t)) close();
+  };
+  const onViewportChange = (e: Event) => {
+    if (pos() && !(e.type === "scroll" && panel?.contains(e.target as Node))) close();
+  };
+  document.addEventListener("pointerdown", onPointerDown);
+  window.addEventListener("resize", onViewportChange);
+  window.addEventListener("scroll", onViewportChange, true);
+  onCleanup(() => {
+    document.removeEventListener("pointerdown", onPointerDown);
+    window.removeEventListener("resize", onViewportChange);
+    window.removeEventListener("scroll", onViewportChange, true);
+  });
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape" || e.key === "Tab") {
+      e.preventDefault();
+      close(true);
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+    e.preventDefault();
+    const list = items();
+    const at = list.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === "Home" ? 0
+      : e.key === "End" ? list.length - 1
+      : e.key === "ArrowDown" ? (at + 1) % list.length
+      : (at - 1 + list.length) % list.length;
+    list[next]?.focus();
+  };
+
+  const current = createMemo(() =>
+    props.value === EMPTY ? props.emptyLabel : props.options.find((o) => o.value === props.value)?.label,
+  );
+  const label = () => (props.value ? `${props.name}: ${current() ?? props.value}` : `Filter by ${props.name.toLowerCase()}`);
+  const Option = (o: { value: string; children: JSX.Element }) => (
+    <button type="button" role="menuitemradio" aria-checked={props.value === o.value} onClick={() => choose(o.value)} class={menuItemClass}>
+      <Check size={14} class={cn("shrink-0", props.value !== o.value && "invisible")} />
+      <span class="truncate">{o.children}</span>
+    </button>
+  );
+
+  return (
+    <>
+      <button
+        ref={button}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={!!pos()}
+        aria-label={label()}
+        title={label()}
+        onClick={() => (pos() ? close() : open())}
+        class={cn(
+          "flex h-6 w-6 items-center justify-center rounded hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          props.value && "bg-accent text-foreground",
+        )}
+      >
+        <Funnel size={12} />
+      </button>
+      <Show when={pos()}>
+        {(p) => (
+          <Portal>
+            <div
+              ref={panel}
+              role="menu"
+              aria-label={`Filter by ${props.name.toLowerCase()}`}
+              onKeyDown={onKeyDown}
+              style={{ top: `${p().top}px`, left: `${p().left}px` }}
+              class="fixed z-50 max-h-72 w-56 overflow-y-auto rounded-lg border border-border bg-background p-1 text-left text-sm font-normal text-foreground shadow-xl"
+            >
+              <Option value="">All</Option>
+              <Show when={props.emptyLabel}>
+                <Option value={EMPTY}>
+                  <span class="text-muted-foreground">{props.emptyLabel}</span>
+                </Option>
+              </Show>
+              <Show when={props.options.length > 0}>
+                <MenuSeparator />
+              </Show>
+              <For each={props.options}>{(o) => <Option value={o.value}>{o.label}</Option>}</For>
+            </div>
+          </Portal>
+        )}
+      </Show>
+    </>
+  );
+}

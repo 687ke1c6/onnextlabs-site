@@ -134,6 +134,8 @@ export const isNegative = (amount: string) => amount.trim().startsWith("-");
 
 /** A stored row in the org, with the most recent upload that contained it. */
 export type OrgTransaction = Transaction & {
+  /** e.g. "Aug 2024": derived from `date`, as in the sheet's `month` column. */
+  month: string;
   account_number: string;
   updated_at: string;
   upload_id: number | null;
