@@ -232,7 +232,7 @@ function UploadPanel(props: { onSaved: (account: string) => void }) {
 
             <div class="mt-5 flex flex-wrap items-center justify-end gap-2">
               <Button variant="ghost" onClick={reset} disabled={!!busy()}>
-                Cancel
+                Discard
               </Button>
               <Button onClick={save} disabled={!!busy()}>
                 <Show when={busy() === "saving"}>
