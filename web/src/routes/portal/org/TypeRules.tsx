@@ -1,4 +1,4 @@
-import { createEffect, createResource, createSignal, For, Index, type JSX, on, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, Index, type JSX, on, onCleanup, Show } from "solid-js";
 import ArrowDown from "lucide-solid/icons/arrow-down";
 import ArrowUp from "lucide-solid/icons/arrow-up";
 import Loader2 from "lucide-solid/icons/loader-circle";
@@ -192,32 +192,55 @@ function IconButton(props: { label: string; onClick: () => void; disabled?: bool
   );
 }
 
-/** Try a description and amount against the rules as currently edited. */
+/** How long to wait after the last change before testing. */
+const TEST_DELAY_MS = 250;
+
+/**
+ * Try a description and amount against the rules as currently edited, as you type: re-runs
+ * whenever the description, amount or rules change (after a short pause).
+ */
 function TestBox(props: { rules: () => Rule[]; onMatch: (index: number | null) => void }) {
   const org = useOrg();
   const [description, setDescription] = createSignal("");
   const [value, setValue] = createSignal("");
   const [result, setResult] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  const [problem, setProblem] = createSignal<string | null>(null);
+  let latest = 0; // only the newest request's answer is shown
 
-  const run = async (e: SubmitEvent) => {
-    e.preventDefault();
-    setError(null);
-    try {
-      const r = await testRules(org.slug, props.rules(), description(), value() || "0");
-      props.onMatch(r.rule);
-      setResult(r.rule === null ? "No rule matches: the type is left blank." : `Rule ${r.rule + 1} matches: type ${r.type}.`);
-    } catch (err) {
-      props.onMatch(null);
-      setResult(null);
-      setError(errorText(err, "Couldn't test the rules."));
-    }
-  };
+  createEffect(
+    on([description, value, () => JSON.stringify(props.rules())], ([text, amount]) => {
+      const request = ++latest;
+      if (!text.trim()) {
+        setResult(null);
+        setProblem(null);
+        props.onMatch(null);
+        return;
+      }
+      const timer = setTimeout(async () => {
+        try {
+          const r = await testRules(org.slug, props.rules(), text, amount || "0");
+          if (request !== latest) return;
+          setProblem(null);
+          props.onMatch(r.rule);
+          setResult(r.rule === null ? "No rule matches: the type is left blank." : `Rule ${r.rule + 1} matches: type ${r.type}.`);
+        } catch (err) {
+          if (request !== latest) return;
+          props.onMatch(null);
+          setResult(null);
+          // Usually a rule that's half written; it clears once the rule is complete.
+          setProblem(errorText(err, "Couldn't test the rules."));
+        }
+      }, TEST_DELAY_MS);
+      onCleanup(() => clearTimeout(timer));
+    }),
+  );
 
   return (
-    <form onSubmit={run} class="rounded-xl border border-border bg-secondary/20 p-4">
+    <div class="rounded-xl border border-border bg-secondary/20 p-4">
       <h2 class="text-sm font-medium">Test the rules</h2>
-      <p class="mt-1 text-xs text-muted-foreground">Uses the rules as they are on this page, saved or not.</p>
+      <p class="mt-1 text-xs text-muted-foreground">
+        Type a description (and an amount) to see which rule matches, as you type. Uses the rules as they are on this page, saved or not.
+      </p>
       <div class="mt-3 flex flex-wrap gap-2">
         <Input
           class="h-9 min-w-0 flex-[3_1_16rem]"
@@ -234,17 +257,14 @@ function TestBox(props: { rules: () => Rule[]; onMatch: (index: number | null) =
           placeholder="Amount, e.g. -57.50"
           aria-label="Amount"
         />
-        <Button type="submit" size="sm" variant="outline" disabled={!description().trim()}>
-          Test
-        </Button>
       </div>
       <Show when={result()}>
         <p class="mt-3 text-sm" role="status">{result()}</p>
       </Show>
-      <Show when={error()}>
-        <p class="mt-3 text-sm text-red-500" role="alert">{error()}</p>
+      <Show when={problem()}>
+        <p class="mt-3 text-sm text-muted-foreground" role="status">{problem()}</p>
       </Show>
-    </form>
+    </div>
   );
 }
 
