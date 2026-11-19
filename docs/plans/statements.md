@@ -217,9 +217,11 @@ TanStack Table (`@tanstack/solid-table`). Uploads moved to their own tab
 (`/portal/<org>/statements/uploads`), next to Type rules.
 
 - Grid features: search (description, type, account, amount), filters for account (when there's more
-  than one), type (including "no type") and a date range, sorting (shift-click for multi-column),
+  than one) and a date range in the toolbar, a type filter (any one type, or "no type") in a popover
+  on the Type column header, sorting (shift-click for multi-column),
   pagination (25–250 rows), and a column picker remembered per browser. In/out/net totals for the
-  filtered rows, per currency. Each row links to the latest upload that contained it.
+  filtered rows, per currency. (The API also returns each row's latest upload; the grid
+  doesn't show it.)
 - Everything happens in the browser on the full list, which is fine for thousands of rows. If an org
   grows to hundreds of thousands, move filtering and paging to the server.
 

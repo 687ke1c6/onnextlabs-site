@@ -1,4 +1,5 @@
-import { createMemo, createResource, createSignal, For, type JSX, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
+import { Portal } from "solid-js/web";
 import { Link } from "@tanstack/solid-router";
 import {
   type ColumnDef,
@@ -17,14 +18,16 @@ import {
 import ArrowDown from "lucide-solid/icons/arrow-down";
 import ArrowUp from "lucide-solid/icons/arrow-up";
 import ArrowUpDown from "lucide-solid/icons/arrow-up-down";
+import Check from "lucide-solid/icons/check";
 import ChevronLeft from "lucide-solid/icons/chevron-left";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import Columns3 from "lucide-solid/icons/columns-3";
+import Funnel from "lucide-solid/icons/funnel";
 import Search from "lucide-solid/icons/search";
 import X from "lucide-solid/icons/x";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import { Menu } from "~/components/ui/menu";
+import { Menu, menuItemClass, MenuSeparator } from "~/components/ui/menu";
 import { can } from "~/lib/orgs";
 import {
   amountValue,
@@ -124,12 +127,6 @@ const columns: ColumnDef<OrgTransaction>[] = [
     meta: { width: "w-32" },
   },
   {
-    accessorKey: "upload_filename",
-    header: "Statement",
-    cell: (c) => <UploadLink row={c.row.original} />,
-    meta: { width: "w-48" },
-  },
-  {
     accessorKey: "updated_at",
     header: "Last saved",
     cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{formatDate(c.getValue<string>())}</span>,
@@ -139,24 +136,6 @@ const columns: ColumnDef<OrgTransaction>[] = [
 
 type ColumnMeta = { width?: string; align?: "right" };
 const meta = (m: unknown) => (m ?? {}) as ColumnMeta;
-
-function UploadLink(props: { row: OrgTransaction }) {
-  const org = useOrg();
-  return (
-    <Show when={props.row.upload_id} fallback={<span class="text-muted-foreground">—</span>}>
-      {(id) => (
-        <Link
-          to="/portal/$org/statements/$upload"
-          params={{ org: org.slug, upload: String(id()) }}
-          class="block max-w-[12rem] truncate text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-          title={props.row.upload_filename ?? ""}
-        >
-          {props.row.upload_filename}
-        </Link>
-      )}
-    </Show>
-  );
-}
 
 function initialVisibility(): VisibilityState {
   try {
@@ -297,16 +276,6 @@ function Grid(props: { rows: OrgTransaction[] }) {
             <For each={accounts()}>{(a) => <option value={a}>{a || "No account"}</option>}</For>
           </select>
         </Show>
-        <select
-          class={cn(SELECT, "min-w-0 flex-[1_1_9rem]")}
-          value={filterValue("type", "")}
-          onChange={(e) => setFilter("type", e.currentTarget.value || undefined)}
-          aria-label="Type"
-        >
-          <option value="">All types</option>
-          <option value={NO_TYPE}>No type</option>
-          <For each={types()}>{(t) => <option value={t}>{t}</option>}</For>
-        </select>
         <div class="flex min-w-0 flex-[2_1_16rem] items-center gap-1">
           <Input
             type="date"
@@ -378,17 +347,26 @@ function Grid(props: { rows: OrgTransaction[] }) {
                           class={cn("px-4 py-2 font-medium", m.width, m.align === "right" && "text-right")}
                           aria-sort={sorted() === "asc" ? "ascending" : sorted() === "desc" ? "descending" : "none"}
                         >
-                          <button
-                            type="button"
-                            onClick={h.column.getToggleSortingHandler()}
-                            class={cn(
-                              "inline-flex items-center gap-1 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                              sorted() && "text-foreground",
-                            )}
-                          >
-                            {flexRender(h.column.columnDef.header, h.getContext()) as JSX.Element}
-                            <SortIcon dir={sorted()} index={h.column.getSortIndex()} multi={sorting().length > 1} />
-                          </button>
+                          <div class={cn("inline-flex items-center gap-1", m.align === "right" && "flex-row-reverse")}>
+                            <button
+                              type="button"
+                              onClick={h.column.getToggleSortingHandler()}
+                              class={cn(
+                                "inline-flex items-center gap-1 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                sorted() && "text-foreground",
+                              )}
+                            >
+                              {flexRender(h.column.columnDef.header, h.getContext()) as JSX.Element}
+                              <SortIcon dir={sorted()} index={h.column.getSortIndex()} multi={sorting().length > 1} />
+                            </button>
+                            <Show when={h.column.id === "type"}>
+                              <TypeFilter
+                                types={types()}
+                                value={filterValue("type", "")}
+                                onChange={(v) => setFilter("type", v || undefined)}
+                              />
+                            </Show>
+                          </div>
                         </th>
                       );
                     }}
@@ -452,6 +430,122 @@ function Grid(props: { rows: OrgTransaction[] }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Filter button in the Type header: a popover listing every type, "No type", and "All types".
+ * Positioned against the viewport (in a portal), so the table's scroll box can't clip it.
+ */
+function TypeFilter(props: { types: string[]; value: string; onChange: (value: string) => void }) {
+  const [pos, setPos] = createSignal<{ top: number; left: number } | null>(null);
+  let button!: HTMLButtonElement;
+  let panel: HTMLDivElement | undefined;
+
+  const items = () => Array.from(panel?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? []);
+  const close = (refocus = false) => {
+    setPos(null);
+    if (refocus) button.focus();
+  };
+  const open = () => {
+    const r = button.getBoundingClientRect();
+    const width = 224;
+    setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left, window.innerWidth - width - 8)) });
+    queueMicrotask(() => (items().find((el) => el.getAttribute("aria-checked") === "true") ?? items()[0])?.focus());
+  };
+  const choose = (v: string) => {
+    props.onChange(v);
+    close(true);
+  };
+
+  const onPointerDown = (e: PointerEvent) => {
+    const t = e.target as Node;
+    if (pos() && !panel?.contains(t) && !button.contains(t)) close();
+  };
+  const onViewportChange = () => pos() && close();
+  document.addEventListener("pointerdown", onPointerDown);
+  window.addEventListener("resize", onViewportChange);
+  window.addEventListener("scroll", onViewportChange, true);
+  onCleanup(() => {
+    document.removeEventListener("pointerdown", onPointerDown);
+    window.removeEventListener("resize", onViewportChange);
+    window.removeEventListener("scroll", onViewportChange, true);
+  });
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape" || e.key === "Tab") {
+      e.preventDefault();
+      close(true);
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+    e.preventDefault();
+    const list = items();
+    const at = list.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === "Home" ? 0
+      : e.key === "End" ? list.length - 1
+      : e.key === "ArrowDown" ? (at + 1) % list.length
+      : (at - 1 + list.length) % list.length;
+    list[next]?.focus();
+  };
+
+  const label = () =>
+    !props.value ? "Filter by type" : props.value === NO_TYPE ? "Filtered: no type" : `Filtered: ${props.value}`;
+  const Option = (o: { value: string; children: JSX.Element }) => (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={props.value === o.value}
+      onClick={() => choose(o.value)}
+      class={menuItemClass}
+    >
+      <Check size={14} class={cn("shrink-0", props.value !== o.value && "invisible")} />
+      <span class="truncate">{o.children}</span>
+    </button>
+  );
+
+  return (
+    <>
+      <button
+        ref={button}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={!!pos()}
+        aria-label={label()}
+        title={label()}
+        onClick={() => (pos() ? close() : open())}
+        class={cn(
+          "flex h-6 w-6 items-center justify-center rounded hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          props.value && "bg-accent text-foreground",
+        )}
+      >
+        <Funnel size={12} />
+      </button>
+      <Show when={pos()}>
+        {(p) => (
+          <Portal>
+            <div
+              ref={panel}
+              role="menu"
+              aria-label="Filter by type"
+              onKeyDown={onKeyDown}
+              style={{ top: `${p().top}px`, left: `${p().left}px` }}
+              class="fixed z-50 max-h-72 w-56 overflow-y-auto rounded-lg border border-border bg-background p-1 text-foreground shadow-xl"
+            >
+              <Option value="">All types</Option>
+              <Option value={NO_TYPE}>
+                <span class="text-muted-foreground">No type</span>
+              </Option>
+              <Show when={props.types.length > 0}>
+                <MenuSeparator />
+              </Show>
+              <For each={props.types}>{(t) => <Option value={t}>{t}</Option>}</For>
+            </div>
+          </Portal>
+        )}
+      </Show>
+    </>
   );
 }
 
