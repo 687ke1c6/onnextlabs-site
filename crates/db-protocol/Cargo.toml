@@ -1,0 +1,20 @@
+[package]
+name = "db-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "The JSON the database service speaks, and (feature `sqlite`) running it against SQLite."
+
+[features]
+# Running statements and batches against a SQLite pool: used by db-server, and by the site
+# while it still opens the database file itself.
+sqlite = ["dep:sqlx", "dep:futures-util"]
+
+[dependencies]
+serde = { workspace = true }
+base64 = { workspace = true }
+sqlx = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }

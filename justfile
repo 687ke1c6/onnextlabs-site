@@ -37,6 +37,10 @@ files:
     mkdir -p data-dav
     RCLONE_USER={{quote(files_user)}} RCLONE_PASS={{quote(files_password)}} rclone serve webdav data-dav --addr 127.0.0.1:8090 --dir-cache-time 5s
 
+# run the database service on :3100 against ./data (the site doesn't use it yet)
+db:
+    DB_TOKEN={{quote(env("DB_TOKEN", "dev-db-token-0123456789"))}} PORT=3100 cargo run -p db-server
+
 # run only the vite dev server
 web:
     bun run --cwd web dev
@@ -67,6 +71,10 @@ test:
 # build the docker image
 docker-build:
     docker build -t {{image}} .
+
+# build the database service's docker image
+docker-build-db:
+    docker build -f crates/db-server/Dockerfile -t {{image}}-db .
 
 # build and run the docker image
 docker-run: docker-build

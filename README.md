@@ -1,6 +1,10 @@
 # OnNext Labs — Coming Soon
 
-Solid + TypeScript + Tailwind v4 + shadcn-style components (`web/`), served by an Axum server (`src/main.rs`).
+Solid + TypeScript + Tailwind v4 + shadcn-style components (`web/`), served by an Axum server (`crates/site`).
+
+The repo is a Cargo workspace: `crates/site` (this server), `crates/statements-core` (statement
+parsing), and the database service, `crates/db-server` with `crates/db-protocol` (see
+[Database service](#database-service)). `cargo run` / `cargo build` mean the site.
 
 ## Develop (devcontainer)
 ```sh
@@ -41,7 +45,7 @@ Signing in alone grants nothing. Access comes from:
 - **Roles** are named sets of permissions, shared by every org and edited at
   `/portal/roles`. Two exist to start with: `Admin-org` (every permission, within
   the orgs where you hold it) and `Member` (`read-docs`).
-  Permissions are fixed in code (`src/rbac.rs`):
+  Permissions are fixed in code (`crates/site/src/rbac.rs`):
 
   | Permission    | Allows, in that org                                                 |
   | ------------- | ------------------------------------------------------------------- |
@@ -189,11 +193,53 @@ it's on whenever sign-in is. In Google Cloud console:
    verification. Signing in to the portal is unaffected either way: it only asks for
    identity.
 
+## Database service
+`crates/db-server` puts the SQLite database behind HTTP, so the data can live on its own host.
+**The site doesn't use it yet**; it still opens `DATA_DIR/onnextlabs.db` itself.
+
+- `GET /health`: no auth.
+- `POST /v1/query`: `{"sql": "...", "args": [...]}`, one statement on its own; answers
+  `{"columns": [...], "rows": [[...]], "rows_affected": n, "last_insert_id": n}`.
+- `POST /v1/batch`: `{"statements": [{"sql", "args"}, ...]}`, run in one transaction (all or
+  nothing); answers `{"results": [...]}`, one result per statement.
+- Failures answer `{"error": {"kind", "message", "statement"?}}`. `kind` is
+  `unique_violation` (and the other constraints), `sql`, `bad_request`, `unauthorized` or
+  `internal`.
+- Values: NULL → `null`, INTEGER → `7`, REAL → `2.5`, TEXT → `"..."`, BLOB → `{"base64": "..."}`.
+
+`/v1` needs `Authorization: Bearer $DB_TOKEN`. There are no transactions spanning
+requests: anything atomic is one batch, and later statements find what earlier ones did by
+subquery. The service runs the migrations in `migrations/` at startup, so a schema change
+must also work with the site version that's already running (add a column, use it later).
+
+```sh
+just db   # on :3100 against ./data, token from DB_TOKEN (default: dev-db-token-0123456789)
+```
+
+| Variable       | Meaning                                                   |
+| -------------- | --------------------------------------------------------- |
+| `DB_TOKEN`     | Bearer token, 16+ characters. Required                    |
+| `DATA_DIR`     | Directory holding `onnextlabs.db`. Default `data`         |
+| `PORT`         | Default `3100`                                            |
+| `MAX_BODY_MIB` | Largest request body (big uploads are one batch). Default `64` |
+
+#### On Railway
+One repo, two services. Add a service from this repo with:
+- variable `RAILWAY_DOCKERFILE_PATH=/crates/db-server/Dockerfile`, `DB_TOKEN`;
+- a volume mounted at `/app/data` (the database moves here from the site's volume);
+- healthcheck path `/health`, no public domain (private network only);
+- watch paths `/crates/db-server/**`, `/crates/db-protocol/**`, `/migrations/**`,
+  `/Cargo.lock`, so site-only changes don't redeploy it. Give the site the opposite
+  (`/web/**`, `/crates/site/**`, `/crates/statements-core/**`, `/crates/db-protocol/**`,
+  `/Dockerfile`, `/Cargo.lock`).
+
 ## Build & run with Docker
 ```sh
 docker build -t onnextlabs-site .
 docker run --rm -p 3000:3000 -v onnextlabs-data:/app/data --env-file .env \
   -e FILES_URL=http://<webdav-host>:8080/ onnextlabs-site
+
+docker build -f crates/db-server/Dockerfile -t onnextlabs-db .   # the database service
 ```
 Mount a volume at `/app/data` (`DATA_DIR`) so the database survives redeploys. Files are on
 the WebDAV server (`FILES_URL`), which must be reachable from the container: `127.0.0.1` in

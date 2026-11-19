@@ -392,7 +392,7 @@ async fn save_role(db: &SqlitePool, id: Option<i64>, role: ValidRole) -> Result<
             i
         }
     };
-    let results = db::run(db, batch).await.map_err(name_taken)?;
+    let results = db::run(db, batch).await.map_err(|e| name_taken(e.into()))?;
     let Some(id) = results[first].first().and_then(db::Value::as_i64) else {
         return Err(not_found("Role not found."));
     };

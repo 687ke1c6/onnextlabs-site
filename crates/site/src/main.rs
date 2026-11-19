@@ -2,6 +2,8 @@
 // `Response` is ~128 bytes, which trips this lint; boxing every error isn't worth it here.
 #![allow(clippy::result_large_err)]
 
+use db_protocol::params;
+
 mod admin;
 mod altcha;
 mod api;

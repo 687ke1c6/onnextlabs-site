@@ -1141,7 +1141,9 @@ async fn put_rules(
             ],
         );
     }
-    db::run(&state.db, batch).await.map_err(db_error)?;
+    db::run(&state.db, batch)
+        .await
+        .map_err(|e| db_error(e.into()))?;
     tracing::info!(org = %org.slug, account = account_id, rules = body.rules.len(), user = user.id, "type rules saved");
     Ok(Json(RulesResponse {
         rules: load_rules(&state.db, account_id).await?,
@@ -1283,7 +1285,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
         let org_id: i64 = sqlx::query_scalar(
             "INSERT INTO organisations (slug, name) VALUES ('acme', 'Acme') RETURNING id",
         )
@@ -1305,7 +1307,7 @@ mod tests {
     }
 
     const SYNTHETIC: &[u8] =
-        include_bytes!("../crates/statements-core/tests/fixtures/sb_csv_synthetic.csv");
+        include_bytes!("../../statements-core/tests/fixtures/sb_csv_synthetic.csv");
 
     fn parsed(rules: &[RuleJson]) -> Statement {
         parse_statement(SYNTHETIC, &validate_rules(rules).unwrap()).unwrap()

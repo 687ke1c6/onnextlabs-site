@@ -1,0 +1,21 @@
+[package]
+name = "db-server"
+version = "0.1.0"
+edition = "2021"
+description = "The site's SQLite database behind HTTP: one-off statements and atomic batches as JSON."
+
+[dependencies]
+db-protocol = { workspace = true, features = ["sqlite"] }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+sqlx = { workspace = true }
+sha2 = { workspace = true }
+subtle = "2.6"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

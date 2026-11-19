@@ -10,22 +10,24 @@ COPY web ./
 RUN bun run build
 
 # ---- Stage 2: build backend on rust:alpine ----
-FROM rust:alpine AS builder
-RUN apk add --no-cache musl-dev
+# cargo-chef builds the dependencies from a recipe of the workspace manifests, so that layer
+# is cached until Cargo.toml/Cargo.lock change, however many crates the workspace has.
+FROM rust:alpine AS chef
+RUN apk add --no-cache musl-dev && cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /app
 
-# Backend (cache dependencies with a stub main)
-COPY Cargo.toml Cargo.lock* ./
-COPY crates/statements-core/Cargo.toml crates/statements-core/
-RUN mkdir src crates/statements-core/src && echo "fn main() {}" > src/main.rs \
-    && touch crates/statements-core/src/lib.rs \
-    && cargo build --release && rm -rf src crates/statements-core/src \
-       target/release/onnextlabs-site* target/release/deps/*statements_core* \
-       target/release/.fingerprint/statements-core-*
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release -p onnextlabs-site --recipe-path recipe.json
+COPY Cargo.toml Cargo.lock ./
 COPY migrations migrations
 COPY crates crates
-COPY src src
-RUN touch src/main.rs crates/statements-core/src/lib.rs && cargo build --release
+RUN cargo build --release -p onnextlabs-site
 
 # ---- Stage 3: minimal runtime ----
 FROM alpine:3.20

@@ -273,7 +273,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
         db
     }
 

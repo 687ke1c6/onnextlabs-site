@@ -279,7 +279,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
         let q = |sql: &'static str| sqlx::query_scalar::<_, i64>(sql);
         let org = q("INSERT INTO organisations (slug, name) VALUES ('a', 'A') RETURNING id")
             .fetch_one(&db)
