@@ -1,8 +1,11 @@
-import { createMemo, createResource, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Link } from "@tanstack/solid-router";
 import type { ColumnDef } from "@tanstack/solid-table";
+import Check from "lucide-solid/icons/check";
+import ChevronUp from "lucide-solid/icons/chevron-up";
 import { DataGrid, dateRangeFilter, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Input } from "~/components/ui/input";
+import { Menu, menuItemClass, useMenu } from "~/components/ui/menu";
 import { can } from "~/lib/orgs";
 import {
   accountLabel,
@@ -97,34 +100,108 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
   },
 ];
 
-/** The sum of Amount over the rows that pass the filters, per currency (in and out in its tooltip). */
-function AmountSum(props: { rows: OrgTransaction[] }) {
-  const sums = createMemo(() => {
-    const by = new Map<string, { in: number; out: number }>();
+type Stat = "sum" | "average" | "min" | "max";
+const STATS: { id: Stat; label: string }[] = [
+  { id: "sum", label: "Sum" },
+  { id: "average", label: "Average" },
+  { id: "min", label: "Min" },
+  { id: "max", label: "Max" },
+];
+const STAT_KEY = "statements-amount-stat";
+
+function initialStat(): Stat {
+  try {
+    const saved = localStorage.getItem(STAT_KEY);
+    if (STATS.some((s) => s.id === saved)) return saved as Stat;
+  } catch {
+    // storage blocked: use the default
+  }
+  return "sum";
+}
+// Shared by every Transactions grid, like the other view settings.
+const [stat, setStat] = createSignal<Stat>(initialStat());
+const chooseStat = (s: Stat) => {
+  setStat(s);
+  try {
+    localStorage.setItem(STAT_KEY, s);
+  } catch {
+    // just don't remember
+  }
+};
+
+function StatChoice(props: { id: Stat; label: string }) {
+  const menu = useMenu();
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={stat() === props.id}
+      onClick={() => {
+        chooseStat(props.id);
+        menu.close();
+      }}
+      class={menuItemClass}
+    >
+      <Check size={14} class={cn("shrink-0", stat() !== props.id && "invisible")} />
+      {props.label}
+    </button>
+  );
+}
+
+/**
+ * Sum, average, min or max of Amount over the rows that pass the filters (all rows when none are
+ * on), per currency; click to choose which, as in a spreadsheet's status bar.
+ */
+function AmountStat(props: { rows: OrgTransaction[] }) {
+  const figures = createMemo(() => {
+    const by = new Map<string, { sum: number; in: number; out: number; n: number; min: number; max: number }>();
     for (const t of props.rows) {
       const v = amountValue(t.amount);
       if (!Number.isFinite(v)) continue;
-      const cur = by.get(t.currency) ?? { in: 0, out: 0 };
-      if (v >= 0) cur.in += v;
-      else cur.out += v;
-      by.set(t.currency, cur);
+      const f = by.get(t.currency) ?? { sum: 0, in: 0, out: 0, n: 0, min: Infinity, max: -Infinity };
+      f.sum += v;
+      if (v >= 0) f.in += v;
+      else f.out += v;
+      f.n += 1;
+      f.min = Math.min(f.min, v);
+      f.max = Math.max(f.max, v);
+      by.set(t.currency, f);
     }
     return [...by.entries()];
   });
-  const fmt = (n: number) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const signed = (n: number) => (n < 0 ? `−${fmt(-n)}` : fmt(n));
+  const fmt = (n: number) =>
+    `${n < 0 ? "−" : ""}${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const value = (f: { sum: number; n: number; min: number; max: number }) =>
+    stat() === "sum" ? f.sum : stat() === "average" ? f.sum / f.n : stat() === "min" ? f.min : f.max;
+  const label = () => STATS.find((s) => s.id === stat())!.label;
+
   return (
-    <For each={sums()}>
-      {([currency, t]) => (
-        <span class="whitespace-nowrap" title={`In ${fmt(t.in)} · out ${fmt(-t.out)}`}>
-          Sum{" "}
-          <span class={cn("font-semibold tabular-nums", t.in + t.out < 0 ? "text-foreground" : "text-emerald-600 dark:text-emerald-400")}>
-            {signed(t.in + t.out)}
-          </span>{" "}
-          {currency}
-        </span>
-      )}
-    </For>
+    <Show when={figures().length > 0}>
+      <Menu
+        label={`Amount: ${label()} (choose sum, average, min or max)`}
+        title={`${label()} of Amount for the rows shown. Click to change.`}
+        trigger={
+          <>
+            <span>{label()}</span>
+            <For each={figures()}>
+              {([currency, f]) => (
+                <span class="whitespace-nowrap">
+                  <span class={cn("font-semibold tabular-nums", value(f) < 0 ? "text-foreground" : "text-emerald-600 dark:text-emerald-400")}>
+                    {fmt(value(f))}
+                  </span>{" "}
+                  {currency}
+                </span>
+              )}
+            </For>
+            <ChevronUp size={12} class="opacity-60" />
+          </>
+        }
+        triggerClass="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        class="w-40"
+      >
+        <For each={STATS}>{(s) => <StatChoice id={s.id} label={s.label} />}</For>
+      </Menu>
+    </Show>
   );
 }
 
@@ -199,7 +276,7 @@ function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> 
                   </div>
                 );
               }}
-              status={(shown) => <AmountSum rows={shown} />}
+              status={(shown) => <AmountStat rows={shown} />}
             />
           </Show>
         )}
