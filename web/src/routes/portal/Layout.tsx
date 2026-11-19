@@ -24,6 +24,7 @@ import { can, fetchMyOrgs, type Org } from "~/lib/orgs";
 import type { Permission } from "~/lib/roles";
 import { theme } from "~/lib/theme";
 import { cn, settled } from "~/lib/utils";
+import { pageIsWide } from "~/lib/view";
 
 type Portal = {
   user: User;
@@ -402,7 +403,7 @@ export function PortalLayout() {
             >
               <Rail user={user()} orgs={settled(orgs) ?? []} onSignOut={signOut} />
               <main class="min-w-0 flex-1 px-4 py-8 sm:px-8">
-                <div class="mx-auto w-full max-w-5xl">
+                <div class={cn("mx-auto w-full", pageIsWide() ? "max-w-none" : "max-w-5xl")}>
                   <Outlet />
                 </div>
               </main>

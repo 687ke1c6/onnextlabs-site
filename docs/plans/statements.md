@@ -238,3 +238,11 @@ TanStack Table (`@tanstack/solid-table`). Uploads moved to their own tab
 - Uploads: file, account, period, rows (plus new/already-saved counts, hidden by default), saved by,
   saved date (with a date range filter); the summary totals the rows in the statements shown.
 
+
+## Step 8: Compact and Wide switches ✅
+
+Two switches at the right of every grid's toolbar, remembered per browser (`web/src/lib/view.ts`):
+- **Compact:** one line per row, every row the same height. Long text is cut off with an ellipsis
+  (hover a cell to see all of it); the table switches to fixed column widths so this works.
+- **Wide:** the portal's content area drops its `max-w-5xl` cap and uses the window's width. It only
+  applies while a grid is on the page, so other portal pages keep their usual width.

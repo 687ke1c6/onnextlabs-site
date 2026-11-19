@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import {
   type ColumnDef,
@@ -28,6 +28,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Menu, menuItemClass, MenuSeparator } from "~/components/ui/menu";
 import { cn } from "~/lib/utils";
+import { compactGrids, gridMounted, gridUnmounted, setCompactGrids, setWideGrids, wideGrids } from "~/lib/view";
 
 /** Header filter value meaning "rows where this column is empty". */
 export const EMPTY = "\u0000empty";
@@ -107,6 +108,9 @@ export function DataGrid<T>(props: {
   const [visibility, setVisibility] = createSignal<VisibilityState>(initialVisibility(props.storageKey, props.defaultHidden ?? []));
   const [pagination, setPagination] = createSignal({ pageIndex: 0, pageSize: 50 });
   const firstPage = () => setPagination((p) => ({ ...p, pageIndex: 0 }));
+  onMount(gridMounted);
+  onCleanup(gridUnmounted);
+  const compact = compactGrids;
 
   const table = createSolidTable<T>({
     get data() {
@@ -219,6 +223,10 @@ export function DataGrid<T>(props: {
             <X size={16} /> Clear
           </Button>
         </Show>
+        <div class="ml-auto flex h-9 items-center gap-4">
+          <Switch label="Compact" hint="One line per row, all the same height" on={compact()} onChange={setCompactGrids} />
+          <Switch label="Wide" hint="Use the full width of the window" on={wideGrids()} onChange={setWideGrids} />
+        </div>
       </div>
 
       {/* What's shown */}
@@ -230,7 +238,7 @@ export function DataGrid<T>(props: {
 
       {/* Table */}
       <div class="overflow-x-auto rounded-xl border border-border">
-        <table class="w-full min-w-[44rem] text-sm">
+        <table class={cn("w-full min-w-[44rem] text-sm", compact() && "table-fixed")}>
           <thead class="border-b border-border bg-secondary/30 text-left text-xs text-muted-foreground">
             <For each={table.getHeaderGroups()}>
               {(group) => (
@@ -294,8 +302,20 @@ export function DataGrid<T>(props: {
                 <tr class="border-b border-border last:border-0 hover:bg-accent/30">
                   <For each={row.getVisibleCells()}>
                     {(cell) => (
-                      <td class={cn("px-4 py-2 align-top", meta<T>(cell.column.columnDef.meta).align === "right" && "text-right")}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext()) as JSX.Element}
+                      <td
+                        class={cn(
+                          "px-4 align-top",
+                          compact() ? "py-1.5" : "py-2",
+                          meta<T>(cell.column.columnDef.meta).align === "right" && "text-right",
+                        )}
+                        // Compact cuts long text off; hovering shows all of it.
+                        title={compact() && typeof cell.getValue() === "string" ? (cell.getValue() as string) : undefined}
+                      >
+                        <Show when={compact()} fallback={flexRender(cell.column.columnDef.cell, cell.getContext()) as JSX.Element}>
+                          <div class="truncate [&_*]:whitespace-nowrap!">
+                            {flexRender(cell.column.columnDef.cell, cell.getContext()) as JSX.Element}
+                          </div>
+                        </Show>
                       </td>
                     )}
                   </For>
@@ -327,6 +347,35 @@ export function DataGrid<T>(props: {
         </div>
       </div>
     </div>
+  );
+}
+
+/** A labelled on/off switch. */
+function Switch(props: { label: string; hint: string; on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={props.on}
+      title={props.hint}
+      onClick={() => props.onChange(!props.on)}
+      class="inline-flex items-center gap-2 rounded text-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <span
+        class={cn(
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-transparent transition-colors",
+          props.on ? "bg-primary" : "bg-input",
+        )}
+      >
+        <span
+          class={cn(
+            "inline-block h-4 w-4 rounded-full bg-background shadow transition-transform",
+            props.on ? "translate-x-4" : "translate-x-0",
+          )}
+        />
+      </span>
+      {props.label}
+    </button>
   );
 }
 
