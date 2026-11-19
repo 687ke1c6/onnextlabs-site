@@ -194,7 +194,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// Only same-site relative paths, so `return_to` can't become an open redirect.
-fn safe_return_to(raw: Option<&str>) -> String {
+pub(crate) fn safe_return_to(raw: Option<&str>) -> String {
     match raw {
         Some(p)
             if p.starts_with('/')

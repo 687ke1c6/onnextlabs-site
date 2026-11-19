@@ -12,6 +12,7 @@ mod orgs;
 mod rate_limit;
 mod rbac;
 mod statements;
+mod statements_google;
 mod storage;
 mod subscribe;
 mod users;
@@ -135,6 +136,8 @@ pub struct AppState {
     altcha: altcha::Altcha,
     /// Where org files live (see `storage`).
     storage: storage::Storage,
+    /// Connecting Google Sheets for statements; None when Google isn't configured.
+    sheets: Option<statements_google::SheetsAuth>,
     max_upload_bytes: u64,
     limiter: RateLimiter,
     client_ip_header: Option<HeaderName>,
@@ -190,6 +193,21 @@ async fn main() {
     } else {
         tracing::info!("admin emails: {}", admin_emails.join(", "));
     }
+    let sheets = match (
+        args.public_url.as_deref(),
+        args.google_client_id.as_deref(),
+        args.google_client_secret.as_deref(),
+    ) {
+        (Some(url), Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => {
+            let s = statements_google::SheetsAuth::new(id.to_owned(), secret.to_owned(), url);
+            tracing::info!(
+                "Google Sheets for statements enabled; redirect URI {}",
+                s.redirect_uri()
+            );
+            Some(s)
+        }
+        _ => None,
+    };
     let auth = build_auth(
         args.public_url.as_deref(),
         args.google_client_id,
@@ -235,6 +253,7 @@ async fn main() {
         // ~50k SHA-256 hashes worst case: well under a second in a browser.
         altcha: altcha::Altcha::new(altcha_key, 50_000, Duration::from_secs(600)),
         storage,
+        sheets,
         max_upload_bytes,
         // Per IP: 5 signups / 10 min. Globally: 60 / min across everyone.
         limiter: RateLimiter::new(
@@ -273,6 +292,7 @@ async fn main() {
         .merge(rbac::routes())
         .merge(documents::routes(max_upload_bytes))
         .merge(statements::routes(max_upload_bytes))
+        .merge(statements_google::routes())
         // Unknown API paths get a JSON 404 rather than the SPA's index.html.
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(spa)

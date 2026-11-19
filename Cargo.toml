@@ -31,6 +31,9 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "r
 quick-xml = "0.37"
 percent-encoding = "2.3.2"
 statements-core = { path = "crates/statements-core" }
+# Used with statements-core's blocking Google client.
+anyhow = "1.0.104"
+ureq = { version = "3.5.2", features = ["json"] }
 
 [profile.release]
 lto = true

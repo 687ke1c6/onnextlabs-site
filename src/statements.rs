@@ -186,7 +186,7 @@ struct PreviewRow {
     date: String,
     amount: String,
     description: String,
-    currency: &'static str,
+    currency: String,
     #[serde(rename = "type")]
     category: Option<String>,
     /// Already stored for this org and account.
@@ -226,7 +226,7 @@ async fn preview(
                 date: t.date.clone(),
                 amount: t.amount.clone(),
                 description: t.description.clone(),
-                currency: t.currency,
+                currency: t.currency.clone(),
                 category: t.category.clone(),
                 stored: stored.contains(&t.id),
             })
@@ -368,7 +368,7 @@ async fn store(
                 .bind(&t.date)
                 .bind(&t.amount)
                 .bind(&t.description)
-                .bind(t.currency)
+                .bind(&t.currency)
                 .bind(&t.category)
                 .bind(id)
                 .execute(&mut *tx)
@@ -389,7 +389,7 @@ async fn store(
                 .bind(&t.date)
                 .bind(&t.amount)
                 .bind(&t.description)
-                .bind(t.currency)
+                .bind(&t.currency)
                 .bind(&t.category)
                 .fetch_one(&mut *tx)
                 .await?
@@ -818,7 +818,7 @@ async fn test_rules(
         date: String::new(),
         description: body.description,
         amount: body.amount.trim().to_string(),
-        currency: "",
+        currency: String::new(),
         category: None,
     };
     let rule = rules.iter().position(|r| r.matches(&t, format));

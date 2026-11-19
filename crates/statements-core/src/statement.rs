@@ -75,7 +75,7 @@ pub struct Transaction {
     pub description: String,
     /// Raw string from the file, never reformatted (it is part of the id).
     pub amount: String,
-    pub currency: &'static str,
+    pub currency: String,
     /// Goes in the `type` column; set by the category rules (`categories.rs`), if any match.
     pub category: Option<String>,
 }

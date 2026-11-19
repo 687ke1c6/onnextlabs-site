@@ -1,13 +1,16 @@
-//! Appending a statement to the chosen tab: read the header row and the existing ids, skip rows already there,
-//! append the rest (with the header row first when the tab is empty). Existing rows are never changed.
+//! Sending a statement to the chosen tab. Every row is sent: rows whose id isn't in the tab are appended (with the
+//! header row first when the tab is empty); rows whose id is already there get their `type` cell overwritten with
+//! the statement's type. Only `type` is ever written to an existing row: every other value this app fills is the
+//! id's own input (date, description, amount) or derived from it, so it's already right. A blank type never
+//! replaces one in the sheet.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::google::{Google, Tab};
-use crate::row::{Cell, Layout};
+use crate::row::{Cell, Column, Layout};
 use crate::statement::{Statement, Transaction};
 
 /// Where the rows go.
@@ -21,10 +24,12 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
     pub parsed: usize,
-    /// Rows skipped because their id is already in the tab.
+    /// Rows whose id was already in the tab.
     pub existing: usize,
     pub appended: usize,
-    /// Appended rows that got a category (`type`).
+    /// Existing rows whose `type` cell was overwritten (every copy of a repeated id counts).
+    pub updated: usize,
+    /// Rows sent with a category (`type`).
     pub categorised: usize,
     pub wrote_header: bool,
     /// Non-blank cells in the id column that aren't ids (e.g. notes or totals); ignored.
@@ -46,7 +51,8 @@ pub fn upload(google: &Google, target: &Target, statement: &Statement) -> Result
     let empty_header = headers.iter().all(|h| h.trim().is_empty());
     let layout = Layout::from_headers(&headers)?;
 
-    let (existing_ids, unreadable_ids) = if empty_header {
+    let mut existing = Existing::default();
+    if empty_header {
         // Writing a header row is only safe if the tab really is empty.
         if !google
             .read_values(id, &format!("{tab}!A2:Z3"))?
@@ -58,21 +64,41 @@ pub fn upload(google: &Google, target: &Target, statement: &Statement) -> Result
                 target.tab.title
             );
         }
-        (HashSet::new(), 0)
     } else {
         let col = column_letter(layout.id_index());
-        let column = google.read_values(id, &format!("{tab}!{col}2:{col}"))?;
-        parse_ids(column.into_iter().filter_map(|row| row.into_iter().next()))
+        let ids = google.read_values(id, &format!("{tab}!{col}2:{col}"))?;
+        existing = Existing::from_column(ids.into_iter().map(|row| row.into_iter().next()));
+        if let Some(type_index) = layout.index_of(Column::Type) {
+            let col = column_letter(type_index);
+            let types = google.read_values(id, &format!("{tab}!{col}2:{col}"))?;
+            existing.types = types
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .next()
+                        .map_or_else(String::new, |c| cell_text(&c))
+                })
+                .collect();
+        }
     };
 
-    let plan = plan(
-        &layout,
-        empty_header,
-        &existing_ids,
-        &statement.transactions,
-    );
-    let appended = plan.new_rows;
-    let categorised = plan.categorised;
+    let plan = plan(&layout, empty_header, &existing, &statement.transactions);
+    if !plan.updates.is_empty() {
+        let col = column_letter(
+            layout
+                .index_of(Column::Type)
+                .expect("updates need a type column"),
+        );
+        let data = plan
+            .updates
+            .iter()
+            .map(|(row, category)| {
+                let cell = Cell::Text(category.clone()).to_json();
+                (format!("{tab}!{col}{row}"), vec![vec![cell]])
+            })
+            .collect();
+        google.update_values(id, data)?;
+    }
     if !plan.rows.is_empty() {
         let rows = plan
             .rows
@@ -87,28 +113,80 @@ pub fn upload(google: &Google, target: &Target, statement: &Statement) -> Result
     }
     Ok(Summary {
         parsed: statement.transactions.len(),
-        existing: statement.transactions.len() - appended,
-        appended,
-        categorised,
+        existing: statement.transactions.len() - plan.new_rows,
+        appended: plan.new_rows,
+        updated: plan.updates.len(),
+        categorised: statement
+            .transactions
+            .iter()
+            .filter(|t| t.category.is_some())
+            .count(),
         wrote_header: empty_header && !plan.rows.is_empty(),
-        unreadable_ids,
+        unreadable_ids: existing.unreadable,
     })
+}
+
+/// What the tab already holds: where each id is (sheet row numbers, 1-based) and the `type` cells.
+#[derive(Default)]
+struct Existing {
+    rows: HashMap<i64, Vec<usize>>,
+    /// The `type` column from row 2 down (index 0 = row 2); empty when the tab has no `type` column.
+    types: Vec<String>,
+    unreadable: usize,
+}
+
+impl Existing {
+    /// From the id column, row 2 down. Blank rows come back as `None` and keep their place.
+    fn from_column(cells: impl Iterator<Item = Option<Value>>) -> Self {
+        let mut existing = Existing::default();
+        for (i, cell) in cells.enumerate() {
+            let Some(cell) = cell.filter(|c| !is_blank(c)) else {
+                continue;
+            };
+            match parse_id(&cell) {
+                Some(id) => existing.rows.entry(id).or_default().push(i + 2),
+                None => existing.unreadable += 1,
+            }
+        }
+        existing
+    }
+
+    fn type_at(&self, row: usize) -> &str {
+        self.types.get(row - 2).map_or("", String::as_str)
+    }
 }
 
 struct Plan {
     /// Rows to append, header row first when there is one.
     rows: Vec<Vec<Cell>>,
     new_rows: usize,
-    categorised: usize,
+    /// `type` cells to overwrite: (sheet row, new type).
+    updates: Vec<(usize, String)>,
 }
 
-/// Which rows to append: transactions whose id isn't in the tab yet, in file order, after the header row for an
-/// empty tab. Nothing at all (not even a header) when there are no new transactions.
-fn plan(layout: &Layout, write_header: bool, existing: &HashSet<i64>, txs: &[Transaction]) -> Plan {
-    let new: Vec<&Transaction> = txs
-        .iter()
-        .filter(|t| !existing.contains(&i64::from(t.id)))
-        .collect();
+/// New ids are appended in file order, after the header row for an empty tab (no header when there's nothing to
+/// append). Ids already in the tab get their `type` overwritten wherever it differs, in every copy; a blank type
+/// leaves the cell alone, and a tab without a `type` column gets no updates.
+fn plan(layout: &Layout, write_header: bool, existing: &Existing, txs: &[Transaction]) -> Plan {
+    let has_type = layout.index_of(Column::Type).is_some();
+    let mut new = Vec::new();
+    let mut updates = Vec::new();
+    let mut seen = HashSet::new();
+    for t in txs {
+        match existing.rows.get(&i64::from(t.id)) {
+            None => new.push(t),
+            Some(rows) => {
+                let Some(category) = t.category.as_ref().filter(|_| has_type) else {
+                    continue;
+                };
+                for &row in rows {
+                    if seen.insert(row) && existing.type_at(row) != category {
+                        updates.push((row, category.clone()));
+                    }
+                }
+            }
+        }
+    }
     let mut rows = Vec::with_capacity(new.len() + 1);
     if write_header && !new.is_empty() {
         rows.push(layout.header_cells());
@@ -117,27 +195,8 @@ fn plan(layout: &Layout, write_header: bool, existing: &HashSet<i64>, txs: &[Tra
     Plan {
         rows,
         new_rows: new.len(),
-        categorised: new.iter().filter(|t| t.category.is_some()).count(),
+        updates,
     }
-}
-
-/// Ids from the id column. They may be stored as numbers (what this app and, most likely, n8n write) or as text.
-/// Returns the ids and the number of non-blank cells that aren't ids.
-fn parse_ids(cells: impl Iterator<Item = Value>) -> (HashSet<i64>, usize) {
-    let mut ids = HashSet::new();
-    let mut unreadable = 0;
-    for cell in cells {
-        if is_blank(&cell) {
-            continue;
-        }
-        match parse_id(&cell) {
-            Some(id) => {
-                ids.insert(id);
-            }
-            None => unreadable += 1,
-        }
-    }
-    (ids, unreadable)
 }
 
 fn parse_id(cell: &Value) -> Option<i64> {
@@ -196,7 +255,7 @@ mod tests {
             date: date.into(),
             description: description.into(),
             amount: amount.into(),
-            currency: "ZAR",
+            currency: "ZAR".into(),
             category: None,
         }
     }
@@ -216,31 +275,49 @@ mod tests {
         assert_eq!(a1_tab("Brad's 2026"), "'Brad''s 2026'");
     }
 
-    #[test]
-    fn reads_ids_stored_as_numbers_or_text() {
-        let cells = [
-            json!(1339188638),
-            json!(-1575916464.0),
-            json!(" 2038276903 "),
-            json!(""),
-            Value::Null,
-            json!("TOTAL"),
-            json!(1.5),
-        ];
-        let (ids, unreadable) = parse_ids(cells.into_iter());
-        assert_eq!(ids, HashSet::from([1339188638, -1575916464, 2038276903]));
-        assert_eq!(unreadable, 2);
+    fn existing(ids: &[(i64, usize)], types: &[&str]) -> Existing {
+        let mut e = Existing::default();
+        for &(id, row) in ids {
+            e.rows.entry(id).or_default().push(row);
+        }
+        e.types = types.iter().map(|t| t.to_string()).collect();
+        e
+    }
+
+    fn typed(mut t: Transaction, category: &str) -> Transaction {
+        t.category = Some(category.into());
+        t
     }
 
     #[test]
-    fn skips_existing_ids_and_keeps_file_order() {
+    fn reads_ids_stored_as_numbers_or_text_and_keeps_rows() {
+        let cells = [
+            Some(json!(1339188638)),
+            Some(json!(-1575916464.0)),
+            None,
+            Some(json!(" 2038276903 ")),
+            Some(json!("")),
+            Some(json!("TOTAL")),
+            Some(json!(1.5)),
+            Some(json!(1339188638)),
+        ];
+        let e = Existing::from_column(cells.into_iter());
+        assert_eq!(e.rows[&1339188638], [2, 9]);
+        assert_eq!(e.rows[&-1575916464], [3]);
+        assert_eq!(e.rows[&2038276903], [5]);
+        assert_eq!(e.rows.len(), 3);
+        assert_eq!(e.unreadable, 2);
+    }
+
+    #[test]
+    fn appends_new_ids_in_file_order() {
         let txs = [
             tx(1, "2026-05-29", "A", "-1"),
             tx(2, "2026-05-30", "B", "-2"),
             tx(3, "2026-05-31", "C", "-3"),
         ];
         let layout = Layout::from_headers(&["id", "amount"]).unwrap();
-        let plan = plan(&layout, false, &HashSet::from([2]), &txs);
+        let plan = plan(&layout, false, &existing(&[(2, 2)], &[]), &txs);
         assert_eq!(plan.new_rows, 2);
         assert_eq!(
             plan.rows,
@@ -249,21 +326,59 @@ mod tests {
                 vec![Cell::Integer(3), Cell::Decimal(-3.0)]
             ]
         );
+        assert!(plan.updates.is_empty());
+    }
+
+    #[test]
+    fn existing_rows_get_their_type_overwritten_in_every_copy() {
+        let layout = Layout::from_headers(&["id", "type"]).unwrap();
+        let txs = [
+            typed(tx(1, "2026-05-29", "A", "-1"), "FEES"),
+            typed(tx(2, "2026-05-30", "B", "-2"), "RENT"),
+            typed(tx(3, "2026-05-31", "C", "-3"), "RATES"),
+        ];
+        // Id 1 is in rows 2 and 4 (one of them already FEES); id 2 in row 3 as OLD; id 3 is new.
+        let e = existing(&[(1, 2), (1, 4), (2, 3)], &["", "OLD", "FEES"]);
+        let plan = plan(&layout, false, &e, &txs);
+        assert_eq!(plan.updates, [(2, "FEES".into()), (3, "RENT".into())]);
+        assert_eq!(plan.new_rows, 1);
+    }
+
+    #[test]
+    fn a_blank_type_never_replaces_one() {
+        let layout = Layout::from_headers(&["id", "type"]).unwrap();
+        let txs = [tx(1, "2026-05-29", "A", "-1")];
+        let plan = plan(&layout, false, &existing(&[(1, 2)], &["FEES"]), &txs);
+        assert!(plan.updates.is_empty());
+        assert!(plan.rows.is_empty());
+    }
+
+    #[test]
+    fn no_type_column_means_no_updates() {
+        let layout = Layout::from_headers(&["id", "amount"]).unwrap();
+        let txs = [typed(tx(1, "2026-05-29", "A", "-1"), "FEES")];
+        let plan = plan(&layout, false, &existing(&[(1, 2)], &[]), &txs);
+        assert!(plan.updates.is_empty());
     }
 
     #[test]
     fn empty_tab_gets_header_row_first() {
         let txs = [tx(1, "2026-05-29", "A", "-1")];
-        let plan = plan(&Layout::default_headers(), true, &HashSet::new(), &txs);
+        let plan = plan(&Layout::default_headers(), true, &Existing::default(), &txs);
         assert_eq!(plan.rows.len(), 2);
         assert_eq!(plan.rows[0][0], Cell::Text("id".into()));
         assert_eq!(plan.rows[1][0], Cell::Integer(1));
     }
 
     #[test]
-    fn nothing_new_means_nothing_written() {
+    fn nothing_new_means_nothing_appended() {
         let txs = [tx(1, "2026-05-29", "A", "-1")];
-        let plan = plan(&Layout::default_headers(), true, &HashSet::from([1]), &txs);
+        let plan = plan(
+            &Layout::default_headers(),
+            true,
+            &existing(&[(1, 2)], &[]),
+            &txs,
+        );
         assert!(plan.rows.is_empty());
         assert_eq!(plan.new_rows, 0);
     }

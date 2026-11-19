@@ -46,7 +46,7 @@ pub fn parse(rows: &[csv::StringRecord]) -> Result<Parsed> {
             date,
             description,
             amount: amount.to_string(),
-            currency: "ZAR",
+            currency: "ZAR".into(),
             category: None,
         });
     }
@@ -115,7 +115,7 @@ mod tests {
                     got.date.as_str(),
                     got.description.as_str(),
                     got.amount.as_str(),
-                    got.currency
+                    got.currency.as_str()
                 ),
                 (
                     want.id,

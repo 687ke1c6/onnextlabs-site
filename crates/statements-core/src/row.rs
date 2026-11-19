@@ -63,7 +63,7 @@ impl Column {
             Column::Date => t.date.clone(),
             Column::Amount => t.amount.clone(),
             Column::Description => t.description.clone(),
-            Column::Currency => t.currency.to_string(),
+            Column::Currency => t.currency.clone(),
             Column::Type => t.category.clone().unwrap_or_default(),
             Column::EffectiveDate => String::new(),
         }
@@ -147,6 +147,11 @@ impl Layout {
             .collect()
     }
 
+    /// Index of `column` in the tab, if it has one.
+    pub fn index_of(&self, column: Column) -> Option<usize> {
+        self.columns.iter().position(|c| *c == Some(column))
+    }
+
     /// Index of the `id` column (always present).
     pub fn id_index(&self) -> usize {
         self.columns
@@ -201,7 +206,7 @@ mod tests {
             date: "2026-05-30".into(),
             description: "OVERDRAFT SERVICE FEE ".into(),
             amount: "-57.5".into(),
-            currency: "ZAR",
+            currency: "ZAR".into(),
             category: None,
         }
     }

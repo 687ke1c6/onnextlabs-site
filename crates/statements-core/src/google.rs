@@ -266,6 +266,36 @@ impl Google {
         Ok(response.updates.updated_rows)
     }
 
+    /// Writes values to several A1 ranges at once, as if typed (`USER_ENTERED`). Returns the number of cells
+    /// updated.
+    pub fn update_values(
+        &self,
+        spreadsheet_id: &str,
+        data: Vec<(String, Vec<Vec<serde_json::Value>>)>,
+    ) -> Result<u64> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Response {
+            #[serde(default)]
+            total_updated_cells: u64,
+        }
+
+        let data: Vec<serde_json::Value> = data
+            .into_iter()
+            .map(|(range, values)| json!({ "range": range, "majorDimension": "ROWS", "values": values }))
+            .collect();
+        let body = json!({ "valueInputOption": "USER_ENTERED", "data": data });
+        let request = || {
+            self.agent
+                .post(format!("{SHEETS_URL}/{spreadsheet_id}/values:batchUpdate"))
+                .query("fields", "totalUpdatedCells")
+        };
+        let response: Response = self
+            .send_json(request, &body)
+            .context("updating rows (Sheets API)")?;
+        Ok(response.total_updated_cells)
+    }
+
     /// Sends a GET with the access token, retrying rate limits and transient server errors.
     fn send<T: DeserializeOwned>(
         &self,

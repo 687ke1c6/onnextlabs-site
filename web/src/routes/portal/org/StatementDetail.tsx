@@ -9,6 +9,7 @@ import { deleteUpload, fetchUpload, formatDate, formatPeriod } from "~/lib/state
 import { settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
+import { GoogleSheetPanel } from "~/routes/portal/org/GoogleSheetPanel";
 import { Fact, TransactionsTable } from "~/routes/portal/org/StatementParts";
 
 const errorText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
@@ -91,7 +92,10 @@ function Detail() {
               <Fact label="When saved" value={`${u().rows_new} new, ${u().rows_updated} already saved`} />
             </dl>
 
-            <section class="mt-6">
+            <GoogleSheetPanel org={org.slug} upload={u().id} />
+
+            <section class="mt-8">
+              <h2 class="mb-3 text-sm font-medium">Rows</h2>
               <TransactionsTable rows={u().transactions} />
             </section>
           </>

@@ -177,29 +177,25 @@ from dropping blank ones. Each rule can be limited to one format, or left on "an
 - API: `GET/PUT /api/orgs/{slug}/statement-rules`. PUT replaces the whole ordered list,
   which keeps reordering simple.
 
-## Step 4: Google Sheets
+## Step 4: Google Sheets ✅ (built; the live Google run is yours)
 
-- `GET /api/statements/google/connect?return_to=…` and `…/callback`: the separate consent
-  flow (state + PKCE), with the token stored by session.
-  `GET /api/statements/google` reports whether you're connected and as which email.
-  `POST …/disconnect` revokes the token.
-- `GET/POST /api/statements/google/spreadsheets`, `GET …/{id}`, and `POST …/{id}/tabs`
-  are the POC's pickers.
-- `POST /api/orgs/{slug}/statements/{id}/sheet` with `{spreadsheet_id, tab}` builds the
-  statement from every row linked to the upload (in file order) and appends it through core. It returns parsed, appended,
-  updated and unchanged counts.
-- Frontend: an "Add to Google Sheet" panel on the upload page, with the pickers ported
-  from the POC.
-- Core change (a deliberate change from the POC, whose spec said existing rows are never
-  changed): `upload` overwrites rows whose id is already in the tab instead of skipping
-  them. It writes only the columns it fills (`id`, `month`, `date`, `amount`,
-  `description`, `currency`, `type`), never `effective_date` or unknown headers, using a
-  batch update on those rows. Every copy of a repeated id is updated. A blank `type` leaves
-  the cell as it is. New ids are appended as before. The summary reports appended,
-  updated and unchanged rows. Unit-tested against the fake Sheets responses the POC tests
-  already use.
-- README: the extra redirect URI to register, and the Testing-mode/test-user note for
-  the sensitive scope.
+Done as below, with these refinements:
+- **Existing rows: only `type` is written,** and only where it differs. Every other column
+  this app fills is the id's own input (date, description, amount) or derived from it, so
+  rewriting them could only change how existing prod cells are formatted. A blank type never
+  replaces one, and a tab with no `type` column gets no updates. Every copy of a repeated id
+  is updated. Updates go in one `values:batchUpdate`; new ids are appended as before.
+- The result reports rows added, types updated, and existing rows left as they were.
+- Connections are kept per portal user (not per browser session), in memory, until the
+  token expires. A callback only completes for the portal user who started it.
+- `Transaction.currency` in core is now a `String`, so stored rows convert back.
+- The last spreadsheet and tab used are remembered in the browser.
+
+Checked here: the consent redirect (scopes, PKCE, redirect URI), the refusals (not signed
+in, no statements access, someone else's or a replayed `state`, cancelled consent), and the
+pickers answering 401 when not connected. **Not checked here** (needs a real Google client):
+the token exchange, listing and creating spreadsheets and tabs, and sending, including the
+type overwrite on a tab that already has the rows.
 
 ## Step 5: Docs and clean-up
 

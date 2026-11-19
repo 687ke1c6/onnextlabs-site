@@ -120,7 +120,7 @@ mod tests {
                     date: "2027-01-01".into(),
                     description: (*description).into(),
                     amount: (*amount).into(),
-                    currency: "ZAR",
+                    currency: "ZAR".into(),
                     category: None,
                 })
                 .collect(),
