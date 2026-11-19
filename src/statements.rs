@@ -17,7 +17,9 @@ use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     body::Bytes,
-    extract::{multipart::MultipartError, DefaultBodyLimit, Multipart, Path as UrlPath, State},
+    extract::{
+        multipart::MultipartError, DefaultBodyLimit, Multipart, Path as UrlPath, Query, State,
+    },
     http::StatusCode,
     response::Response,
     routing::{get, post},
@@ -66,6 +68,7 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
             post(preview).layer(DefaultBodyLimit::max(body_limit)),
         )
         .route("/api/orgs/{org}/statements/{id}", get(show).delete(remove))
+        .route("/api/orgs/{org}/statement-accounts", get(accounts))
         .route(
             "/api/orgs/{org}/statement-transactions",
             get(all_transactions),
@@ -480,17 +483,62 @@ pub struct UploadDetail {
     pub transactions: Vec<StoredTransaction>,
 }
 
-/// GET /api/orgs/{org}/statements — the org's uploads, newest first.
+/// `?account=<number>`: only that account ('' = statements that state none). Absent = all.
+#[derive(Deserialize)]
+struct AccountQuery {
+    account: Option<String>,
+}
+
+/// An account the org has statements for.
+#[derive(Serialize, sqlx::FromRow)]
+struct AccountSummary {
+    /// '' when the statements don't state one.
+    account_number: String,
+    uploads: i64,
+    rows: i64,
+    last_uploaded_at: String,
+}
+
+/// GET /api/orgs/{org}/statement-accounts — accounts with statements, most recently uploaded
+/// first.
+async fn accounts(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+) -> Result<Json<Vec<AccountSummary>>, Response> {
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
+    Ok(Json(
+        org_accounts(&state.db, org.id).await.map_err(db_error)?,
+    ))
+}
+
+async fn org_accounts(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<AccountSummary>> {
+    sqlx::query_as(
+        "SELECT u.account_number, count(*) AS uploads, max(u.uploaded_at) AS last_uploaded_at,
+                (SELECT count(*) FROM statement_transactions t
+                 WHERE t.org_id = u.org_id AND t.account_number = u.account_number) AS rows
+         FROM statement_uploads u WHERE u.org_id = ?
+         GROUP BY u.account_number ORDER BY last_uploaded_at DESC, max(u.id) DESC",
+    )
+    .bind(org_id)
+    .fetch_all(db)
+    .await
+}
+
+/// GET /api/orgs/{org}/statements?account= — the org's uploads, newest first.
 async fn list(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
     UrlPath(slug): UrlPath<String>,
+    Query(q): Query<AccountQuery>,
 ) -> Result<Json<Vec<UploadSummary>>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
     let uploads = sqlx::query_as(select_upload!(
-        "WHERE u.org_id = ? ORDER BY u.uploaded_at DESC, u.id DESC"
+        "WHERE u.org_id = ?1 AND (?2 IS NULL OR u.account_number = ?2)
+         ORDER BY u.uploaded_at DESC, u.id DESC"
     ))
     .bind(org.id)
+    .bind(q.account)
     .fetch_all(&state.db)
     .await
     .map_err(db_error)?;
@@ -558,22 +606,27 @@ struct OrgTransaction {
     upload_filename: Option<String>,
 }
 
-/// GET /api/orgs/{org}/statement-transactions — every stored row in the org, newest first.
-/// The page sorts, filters and pages them itself.
+/// GET /api/orgs/{org}/statement-transactions?account= — every stored row in the org (or
+/// account), newest first. The page sorts, filters and pages them itself.
 async fn all_transactions(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
     UrlPath(slug): UrlPath<String>,
+    Query(q): Query<AccountQuery>,
 ) -> Result<Json<Vec<OrgTransaction>>, Response> {
     let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
     Ok(Json(
-        org_transactions(&state.db, org.id)
+        org_transactions(&state.db, org.id, q.account.as_deref())
             .await
             .map_err(db_error)?,
     ))
 }
 
-async fn org_transactions(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<OrgTransaction>> {
+async fn org_transactions(
+    db: &SqlitePool,
+    org_id: i64,
+    account: Option<&str>,
+) -> sqlx::Result<Vec<OrgTransaction>> {
     sqlx::query_as(
         "SELECT t.txn_id, t.account_number, t.date, t.amount, t.description, t.currency, t.type,
                 t.updated_at, u.id AS upload_id, u.filename AS upload_filename
@@ -581,10 +634,11 @@ async fn org_transactions(db: &SqlitePool, org_id: i64) -> sqlx::Result<Vec<OrgT
          LEFT JOIN statement_uploads u ON u.id = (
              SELECT max(l.upload_id) FROM statement_upload_transactions l
              WHERE l.transaction_id = t.id)
-         WHERE t.org_id = ?
+         WHERE t.org_id = ?1 AND (?2 IS NULL OR t.account_number = ?2)
          ORDER BY t.date DESC, t.id DESC",
     )
     .bind(org_id)
+    .bind(account)
     .fetch_all(db)
     .await
     .map(|mut rows: Vec<OrgTransaction>| {
@@ -1101,13 +1155,61 @@ mod tests {
         let second = store(&db, &org, user, "b.csv", "x", &st, None)
             .await
             .unwrap();
-        let rows = org_transactions(&db, org.id).await.unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
         assert_eq!(rows.len(), st.transactions.len());
         assert!(rows.iter().all(|r| r.upload_id == Some(second)));
         let first = rows.iter().find(|r| r.date == "2027-12-29").unwrap();
         assert_eq!(first.month, "Dec 2027");
         assert!(rows.windows(2).all(|w| w[0].date >= w[1].date));
-        assert!(org_transactions(&db, org.id + 1).await.unwrap().is_empty());
+        assert!(org_transactions(&db, org.id + 1, None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn rows_and_accounts_by_account() {
+        let (db, org, user) = test_db().await;
+        let st = parsed(&[]);
+        let n = st.transactions.len();
+        store(&db, &org, user, "a.csv", "x", &st, None)
+            .await
+            .unwrap();
+        let mut other = st.clone();
+        other.account_number = Some("999".into());
+        other.transactions.truncate(3);
+        store(&db, &org, user, "b.csv", "x", &other, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            org_transactions(&db, org.id, None).await.unwrap().len(),
+            n + 3
+        );
+        let mine = org_transactions(&db, org.id, Some("123456789"))
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), n);
+        assert!(mine.iter().all(|r| r.account_number == "123456789"));
+        assert_eq!(
+            org_transactions(&db, org.id, Some("999"))
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(org_transactions(&db, org.id, Some(""))
+            .await
+            .unwrap()
+            .is_empty());
+
+        let accounts = org_accounts(&db, org.id).await.unwrap();
+        let summary: Vec<(&str, i64, i64)> = accounts
+            .iter()
+            .map(|a| (a.account_number.as_str(), a.uploads, a.rows))
+            .collect();
+        // Most recently uploaded first.
+        assert_eq!(summary, [("999", 1, 3), ("123456789", 1, n as i64)]);
     }
 
     #[tokio::test]

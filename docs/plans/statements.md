@@ -230,7 +230,7 @@ TanStack Table (`@tanstack/solid-table`). Uploads moved to their own tab
 - One grid component (`web/src/components/DataGrid.tsx`) serves both tabs: search, header filters,
   multi-column sorting, pagination, a column picker remembered per browser, a toolbar slot (the date
   range) and a summary line.
-- Header filters (a funnel in the column header: tick any number of values, or blanks; "All" clears) on Month, Account and Type
+- Header filters (a funnel in the column header: tick any number of values, or blanks; "All" clears) on Month and Type
   in Transactions, and on Account and Saved by in Uploads. The toolbar account select is gone.
 - **Month** isn't stored: the API derives it from `date` with core's `row::month_label`, the same
   function that fills the sheet's `month` column, so the two always agree. It sorts and lists
@@ -246,3 +246,18 @@ Two switches at the right of every grid's toolbar, remembered per browser (`web/
   (hover a cell to see all of it); the table switches to fixed column widths so this works.
 - **Wide:** the portal's content area drops its `max-w-5xl` cap and uses the window's width. It only
   applies while a grid is on the page, so other portal pages keep their usual width.
+
+## Step 9: One account at a time ✅
+
+People only ever look at one bank account's statements at a time, so the account is a page-level
+choice, not a column:
+- An **Account** picker in the Statements page header (Transactions and Uploads tabs), listing the
+  org's accounts (`GET /api/orgs/{slug}/statement-accounts`: uploads, rows, last upload; most
+  recent first). The choice is remembered per org in the browser; otherwise the most recently
+  uploaded account is shown. Saving a statement switches to its account.
+- `?account=` on `statements` and `statement-transactions` returns only that account's rows
+  (`''` = statements stating none); without it, everything (kept for the API's other uses).
+- The Account column and its filter are gone from both grids. Switching account starts the grid
+  afresh (filters and paging reset).
+- Type rules stay per organisation.
+

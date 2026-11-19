@@ -4,11 +4,19 @@ import type { ColumnDef } from "@tanstack/solid-table";
 import { DataGrid, dateRangeFilter, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Input } from "~/components/ui/input";
 import { can } from "~/lib/orgs";
-import { amountValue, fetchOrgTransactions, formatAmount, formatDate, isNegative, type OrgTransaction } from "~/lib/statements";
+import {
+  accountLabel,
+  amountValue,
+  fetchOrgTransactions,
+  formatAmount,
+  formatDate,
+  isNegative,
+  type OrgTransaction,
+} from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
-import { StatementsTabs } from "~/routes/portal/org/StatementParts";
+import { AccountPicker, StatementsTabs, useStatementAccount } from "~/routes/portal/org/StatementParts";
 
 type Meta = GridColumnMeta<OrgTransaction>;
 
@@ -35,16 +43,6 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
     sortingFn: (a, b) => a.original.date.slice(0, 7).localeCompare(b.original.date.slice(0, 7)),
     filterFn: pickFilter,
     meta: { width: "w-32", pick: { options: monthOptions } } satisfies Meta,
-  },
-  {
-    accessorKey: "account_number",
-    header: "Account",
-    cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{c.getValue<string>() || "—"}</span>,
-    filterFn: pickFilter,
-    meta: {
-      width: "w-36",
-      pick: { options: (rows) => distinct(rows, (r) => r.account_number), emptyLabel: "No account" },
-    } satisfies Meta,
   },
   {
     accessorKey: "description",
@@ -126,43 +124,63 @@ function Totals(props: { rows: OrgTransaction[] }) {
   );
 }
 
-function TransactionsView() {
+function NoTransactions() {
   const org = useOrg();
-  const [rows] = createResource(() => org.slug, fetchOrgTransactions);
+  return (
+    <section class="rounded-xl border border-dashed border-border px-6 py-14 text-center">
+      <h2 class="text-base font-medium">No transactions yet</h2>
+      <p class="mt-1 text-sm text-muted-foreground">Rows appear here once a statement is saved.</p>
+      <Show when={can(org, "write-statements")}>
+        <Link
+          to="/portal/$org/statements/uploads"
+          params={{ org: org.slug }}
+          class="mt-4 inline-flex h-9 items-center rounded-md border border-input px-3 text-sm font-medium hover:bg-accent"
+        >
+          Upload a statement
+        </Link>
+      </Show>
+    </section>
+  );
+}
+
+function TransactionsView(props: { acct: ReturnType<typeof useStatementAccount> }) {
+  const org = useOrg();
+  // Each result carries its account, so rows from the previous account never show under the new one.
+  const [rows] = createResource(
+    () => {
+      const a = props.acct.account();
+      return a ? { account: a.number } : undefined;
+    },
+    async ({ account }) => ({ account, rows: await fetchOrgTransactions(org.slug, account) }),
+  );
+  const current = () => {
+    const data = settled(rows);
+    const a = props.acct.account();
+    return data && a && data.account === a.number ? data : undefined;
+  };
+  const error = () => rows.error ?? props.acct.accounts.error;
+
   return (
     <div class="mt-6">
-      <Show when={rows.error}>
-        <p class="text-sm text-red-500">{rows.error instanceof Error ? rows.error.message : "Couldn't load transactions."}</p>
+      <Show when={error()}>
+        {(e) => <p class="text-sm text-red-500">{e() instanceof Error ? (e() as Error).message : "Couldn't load transactions."}</p>}
       </Show>
-      <Show when={!settled(rows) && rows.loading}>
+      <Show when={props.acct.account() === null}>
+        <NoTransactions />
+      </Show>
+      <Show when={props.acct.account() && !current() && !error()}>
         <div class="h-64 animate-pulse rounded-xl bg-secondary/40" />
       </Show>
-      <Show when={settled(rows)}>
-        {(r) => (
-          <Show
-            when={r().length > 0}
-            fallback={
-              <section class="rounded-xl border border-dashed border-border px-6 py-14 text-center">
-                <h2 class="text-base font-medium">No transactions yet</h2>
-                <p class="mt-1 text-sm text-muted-foreground">Rows appear here once a statement is saved.</p>
-                <Show when={can(org, "write-statements")}>
-                  <Link
-                    to="/portal/$org/statements/uploads"
-                    params={{ org: org.slug }}
-                    class="mt-4 inline-flex h-9 items-center rounded-md border border-input px-3 text-sm font-medium hover:bg-accent"
-                  >
-                    Upload a statement
-                  </Link>
-                </Show>
-              </section>
-            }
-          >
+      {/* Keyed: a new account starts with fresh filters and paging. */}
+      <Show when={current()} keyed>
+        {(data) => (
+          <Show when={data.rows.length > 0} fallback={<NoTransactions />}>
             <DataGrid
-              rows={r()}
+              rows={data.rows}
               columns={columns}
               initialSorting={[{ id: "date", desc: true }]}
-              search={(t, q) => [t.description, t.type ?? "", t.account_number, t.amount, t.month].some((v) => v.toLowerCase().includes(q))}
-              searchPlaceholder="Search description, type, account, amount, month"
+              search={(t, q) => [t.description, t.type ?? "", t.amount, t.month].some((v) => v.toLowerCase().includes(q))}
+              searchPlaceholder="Search description, type, amount, month"
               storageKey="statements-grid-columns"
               defaultHidden={["currency", "txn_id", "updated_at"]}
               noun={["row", "rows"]}
@@ -186,14 +204,28 @@ function TransactionsView() {
   );
 }
 
-/** /portal/<org>/statements: every saved row in the org. Needs `read-statements`. */
+function Transactions() {
+  const org = useOrg();
+  const acct = useStatementAccount();
+  const description = () => {
+    const a = acct.account();
+    return a ? `Every transaction saved for account ${accountLabel(a.number)}.` : `Transactions saved for ${org.name}.`;
+  };
+  return (
+    <>
+      <PageHeader title="Statements" description={description()} actions={<AccountPicker state={acct} />} />
+      <StatementsTabs />
+      <TransactionsView acct={acct} />
+    </>
+  );
+}
+
+/** /portal/<org>/statements: every saved row for the chosen account. Needs `read-statements`. */
 export function TransactionsPage() {
   const org = useOrg();
   return (
     <Allowed when={can(org, "read-statements")}>
-      <PageHeader title="Statements" description={`Every transaction saved for ${org.name}, from all statements.`} />
-      <StatementsTabs />
-      <TransactionsView />
+      <Transactions />
     </Allowed>
   );
 }

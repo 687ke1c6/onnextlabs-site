@@ -86,8 +86,26 @@ export const saveStatement = async (org: string, file: File, saveToDocuments: bo
     "Couldn't save the statement.",
   );
 
-export const fetchUploads = async (org: string) =>
-  json<UploadSummary[]>(await fetch(`${base(org)}/statements`), "Couldn't load statements.");
+/** `?account=` for list endpoints; "" (statements stating no account) is a real value. */
+const accountQuery = (account: string) => `?account=${encodeURIComponent(account)}`;
+
+export const fetchUploads = async (org: string, account: string) =>
+  json<UploadSummary[]>(await fetch(`${base(org)}/statements${accountQuery(account)}`), "Couldn't load statements.");
+
+/** An account the org has statements for. */
+export type AccountSummary = {
+  /** "" when the statements don't state one. */
+  account_number: string;
+  uploads: number;
+  rows: number;
+  last_uploaded_at: string;
+};
+
+/** Accounts with statements, most recently uploaded first. */
+export const fetchAccounts = async (org: string) =>
+  json<AccountSummary[]>(await fetch(`${base(org)}/statement-accounts`), "Couldn't load accounts.");
+
+export const accountLabel = (account: string) => account || "No account stated";
 
 export const fetchUpload = async (org: string, id: number) =>
   json<UploadDetail>(await fetch(`${base(org)}/statements/${id}`), "Couldn't load this statement.");
@@ -142,9 +160,9 @@ export type OrgTransaction = Transaction & {
   upload_filename: string | null;
 };
 
-/** Every stored row in the org, newest first. */
-export const fetchOrgTransactions = async (org: string) =>
-  json<OrgTransaction[]>(await fetch(`${base(org)}/statement-transactions`), "Couldn't load transactions.");
+/** Every stored row for one account in the org, newest first. */
+export const fetchOrgTransactions = async (org: string, account: string) =>
+  json<OrgTransaction[]>(await fetch(`${base(org)}/statement-transactions${accountQuery(account)}`), "Couldn't load transactions.");
 
 /** The amount as a number (the stored string is kept exactly as in the file). NaN if unreadable. */
 export const amountValue = (amount: string) => Number(amount.replace(/,/g, "").trim());

@@ -22,12 +22,18 @@ import {
 import { cn, settled } from "~/lib/utils";
 import { Allowed, PageHeader } from "~/routes/portal/Layout";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
-import { Fact, StatementsTabs, TransactionsTable } from "~/routes/portal/org/StatementParts";
+import {
+  AccountPicker,
+  Fact,
+  StatementsTabs,
+  TransactionsTable,
+  useStatementAccount,
+} from "~/routes/portal/org/StatementParts";
 
 const errorText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
 /** Drop a statement, see what it holds, then save it (optionally with a copy in Documents). */
-function UploadPanel() {
+function UploadPanel(props: { onSaved: (account: string) => void }) {
   const org = useOrg();
   const navigate = useNavigate();
   let fileInput!: HTMLInputElement;
@@ -76,6 +82,8 @@ function UploadPanel() {
     setBusy("saving");
     try {
       const saved = await saveStatement(org.slug, f, toDocuments(), folder());
+      // The Statements pages now show the account this statement belongs to.
+      props.onSaved(saved.account_number);
       void navigate({ to: "/portal/$org/statements/$upload", params: { org: org.slug, upload: String(saved.id) } });
     } catch (e) {
       setError(errorText(e, "Couldn't save the statement."));
@@ -262,16 +270,6 @@ const uploadColumns: ColumnDef<UploadSummary, any>[] = [
     enableHiding: false,
   },
   {
-    accessorKey: "account_number",
-    header: "Account",
-    cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{c.getValue<string>() || "—"}</span>,
-    filterFn: pickFilter,
-    meta: {
-      width: "w-36",
-      pick: { options: (rows) => distinct(rows, (u) => u.account_number), emptyLabel: "No account" },
-    } satisfies UploadMeta,
-  },
-  {
     id: "period",
     accessorFn: (u) => u.first_date ?? "",
     header: "Period",
@@ -318,29 +316,43 @@ const uploadColumns: ColumnDef<UploadSummary, any>[] = [
   },
 ];
 
-function UploadsList() {
+function UploadsList(props: { acct: ReturnType<typeof useStatementAccount> }) {
   const org = useOrg();
-  const [uploads] = createResource(() => org.slug, fetchUploads);
+  // Each result carries its account, so one account's statements never show under another.
+  const [uploads] = createResource(
+    () => {
+      const a = props.acct.account();
+      return a ? { account: a.number } : undefined;
+    },
+    async ({ account }) => ({ account, list: await fetchUploads(org.slug, account) }),
+  );
+  const current = () => {
+    const data = settled(uploads);
+    const a = props.acct.account();
+    return data && a && data.account === a.number ? data : undefined;
+  };
+  const error = () => uploads.error ?? props.acct.accounts.error;
 
   return (
     <section class="mt-8">
       <h2 class="mb-3 text-sm font-medium">Saved statements</h2>
-      <Show when={uploads.error}>
-        <p class="text-sm text-red-500">{errorText(uploads.error, "Couldn't load statements.")}</p>
+      <Show when={error()}>
+        <p class="text-sm text-red-500">{errorText(error(), "Couldn't load statements.")}</p>
       </Show>
-      <Show when={settled(uploads)?.length === 0}>
+      <Show when={props.acct.account() === null || current()?.list.length === 0}>
         <p class="rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
           No statements saved yet.
         </p>
       </Show>
-      <Show when={settled(uploads)?.length ? settled(uploads) : undefined}>
-        {(list) => (
+      {/* Keyed: a new account starts with fresh filters and paging. */}
+      <Show when={current()?.list.length ? current() : undefined} keyed>
+        {(data) => (
           <DataGrid
-            rows={list()}
+            rows={data.list}
             columns={uploadColumns}
             initialSorting={[{ id: "uploaded_at", desc: true }]}
-            search={(u, q) => [u.filename, u.account_number, u.uploaded_by ?? ""].some((v) => v.toLowerCase().includes(q))}
-            searchPlaceholder="Search file, account, who saved it"
+            search={(u, q) => [u.filename, u.uploaded_by ?? ""].some((v) => v.toLowerCase().includes(q))}
+            searchPlaceholder="Search file, who saved it"
             storageKey="statements-uploads-columns"
             defaultHidden={["rows_new", "rows_updated"]}
             noun={["statement", "statements"]}
@@ -363,20 +375,31 @@ function UploadsList() {
   );
 }
 
+function Uploads() {
+  const org = useOrg();
+  const acct = useStatementAccount();
+  return (
+    <>
+      <PageHeader
+        title="Statements"
+        description="Statement files saved for this account. Open one to see its rows or send them to your own Google Sheet."
+        actions={<AccountPicker state={acct} />}
+      />
+      <StatementsTabs />
+      <Show when={can(org, "write-statements")}>
+        <UploadPanel onSaved={(account) => acct.pick(account)} />
+      </Show>
+      <UploadsList acct={acct} />
+    </>
+  );
+}
+
 /** /portal/<org>/statements/uploads. Needs `read-statements`; uploading needs `write-statements`. */
 export function UploadsPage() {
   const org = useOrg();
   return (
     <Allowed when={can(org, "read-statements")}>
-      <PageHeader
-        title="Statements"
-        description={`Statement files saved for ${org.name}. Open one to see its rows or send them to your own Google Sheet.`}
-      />
-      <StatementsTabs />
-      <Show when={can(org, "write-statements")}>
-        <UploadPanel />
-      </Show>
-      <UploadsList />
+      <Uploads />
     </Allowed>
   );
 }
