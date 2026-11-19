@@ -60,7 +60,7 @@ CREATE TABLE statement_transactions (
     org_id         INTEGER NOT NULL REFERENCES organisations (id) ON DELETE CASCADE,
     upload_id      INTEGER NOT NULL REFERENCES statement_uploads (id) ON DELETE CASCADE,
     account_number TEXT    NOT NULL DEFAULT '',  -- '' when the format doesn't state one
-    txn_id         INTEGER NOT NULL,             -- the n8n i32 hash
+    txn_id         INTEGER NOT NULL,             -- the prod n8n i32 hash, as written to Sheets
     date           TEXT    NOT NULL,             -- YYYY-MM-DD
     amount         TEXT    NOT NULL,             -- raw string, part of the hash
     description    TEXT    NOT NULL,             -- incl. any '_' suffix and trailing spaces
@@ -83,8 +83,12 @@ CREATE TABLE statement_type_rules (
 ```
 
 Decided:
-- **Dedupe key** is `(org, account_number, txn_id)`. The id hashes only date, description
-  and amount, so without the account two accounts could produce the same id. For formats
+- **The transaction id is the prod n8n hash, unchanged.** `txn_id` is exactly the id written
+  to Google Sheets today, from the same inputs (date, description, amount) and the same
+  function, so it matches the existing prod data. Org and account are never hashed in.
+- **Uniqueness lives in the database, not the id.** The constraint
+  `UNIQUE (org_id, account_number, txn_id)` only stops a row from being stored twice for
+  the same org and account. The same hash in another org or account is fine. For formats
   with no account number (none yet), every file of that format shares `''`.
 - **Deleting an upload** removes its transactions, so re-uploading the statement adds them
   again. A linked document is left alone.
