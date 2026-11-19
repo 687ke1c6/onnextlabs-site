@@ -15,10 +15,10 @@ reviewed and committed on its own.
    Optionally, it also saves the original file to the org's Documents. The default folder is
    `Statements`, and this needs `write-docs` as well.
 4. Optionally, from a saved upload: **Add to Google Sheet**. Connect Google (separate
-   consent, Sheets scopes only), pick or create a spreadsheet and tab, and append **every
-   row of that statement**, whether or not it was already in the database. The rules are the
-   same as the POC and prod: ids already in the tab are skipped (existing sheet rows are never
-   changed), and the header row is written to an empty tab.
+   consent, Sheets scopes only), pick or create a spreadsheet and tab, and send **every
+   row of that statement**, whether or not it was already in the database or the sheet. Rows
+   whose id is already in the tab are overwritten in place, and the rest are appended. The
+   header row is written to an empty tab, as in the POC.
 
 The database is the record. The Google Sheet is an optional copy for each person, going to
 a sheet they own. Having a row in the database never stops it going to a sheet.
@@ -104,14 +104,16 @@ Decided:
   with no account number (none yet), every file of that format shares `''`.
 - **Re-uploading overwrites.** Saving upserts on `(org_id, account_number, txn_id)`. The
   hash inputs (date, description, amount) are identical by definition, so in practice this
-  refreshes `type` from the current rules and `updated_at`. Re-uploading a statement is
+  refreshes `type` from the current rules (see the blank-type rule below) and `updated_at`. Re-uploading a statement is
   also how edited rules get applied to stored rows. (If manual type edits are added later,
   this will need revisiting.)
 - **Rows are shared between uploads.** `statement_upload_transactions` links each upload to
   every row it contained, so "Add to Google Sheet" sends the whole statement.
 - **Deleting an upload** removes its links and any transactions no other upload still
   contains. A linked document is left alone.
-- **The sheet still skips, never overwrites.** That's prod behaviour, kept unchanged.
+- **A blank type never replaces a type.** When no rule matches, the stored `type` (in the
+  database, and in the sheet) is kept. A type from a rule always overwrites. This protects
+  existing prod categories when an org has no rules yet, and types typed into the sheet.
 - **Columns:** `org_id` and the upload links are enough for now.
 
 ## Step 0: Workspace and core crate (no visible change) ✅
@@ -169,10 +171,18 @@ dependencies). Notes:
 - `GET/POST /api/statements/google/spreadsheets`, `GET …/{id}`, and `POST …/{id}/tabs`
   are the POC's pickers.
 - `POST /api/orgs/{slug}/statements/{id}/sheet` with `{spreadsheet_id, tab}` builds the
-  statement from every row linked to the upload (in file order) and appends it through core. It returns parsed, skipped
-  and appended counts.
+  statement from every row linked to the upload (in file order) and appends it through core. It returns parsed, appended,
+  updated and unchanged counts.
 - Frontend: an "Add to Google Sheet" panel on the upload page, with the pickers ported
   from the POC.
+- Core change (a deliberate change from the POC, whose spec said existing rows are never
+  changed): `upload` overwrites rows whose id is already in the tab instead of skipping
+  them. It writes only the columns it fills (`id`, `month`, `date`, `amount`,
+  `description`, `currency`, `type`), never `effective_date` or unknown headers, using a
+  batch update on those rows. Every copy of a repeated id is updated. A blank `type` leaves
+  the cell as it is. New ids are appended as before. The summary reports appended,
+  updated and unchanged rows. Unit-tested against the fake Sheets responses the POC tests
+  already use.
 - README: the extra redirect URI to register, and the Testing-mode/test-user note for
   the sensitive scope.
 
