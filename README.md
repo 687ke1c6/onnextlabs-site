@@ -29,6 +29,9 @@ Signing in alone grants nothing. Access comes from:
   admins set it for others at `/portal/users` (Manage → Users), which lists everyone who
   has signed in. Verified `ADMIN_EMAILS` addresses are always admins (use it to bootstrap
   the first one). You can't remove your own admin flag. Org roles never make anyone an admin.
+- **Organisations** are created by admins. Their name can be changed later (Manage →
+  Organisations, by admins or anyone with `manage-orgs` there); their URL name can't, as it's
+  also their folder in file storage.
 - **Organisation membership**: members land on `/portal`, see their organisations, and open
   each at `/portal/<slug>`. Each membership has one **role**, so someone can be an Admin-org in
   one org and a Member in another.
@@ -57,6 +60,7 @@ The same can be done on the command line (people must have signed in once to be 
 ```sh
 onnextlabs-site grant-admin someone@example.com    # recovery; revoke-admin undoes it
 onnextlabs-site create-org "World Health Organisation"   # → /portal/world-health-organisation
+onnextlabs-site rename-org world-health-organisation "WHO"   # the name only; the URL stays
 onnextlabs-site add-member world-health-organisation someone@example.com   # as Member
 onnextlabs-site add-member world-health-organisation someone@example.com --role Admin-org   # or change role
 onnextlabs-site remove-member world-health-organisation someone@example.com

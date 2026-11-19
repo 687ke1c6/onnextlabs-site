@@ -61,6 +61,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/orgs", get(my_orgs))
         .route("/api/manage/orgs", get(manageable_orgs).post(create_org))
+        .route("/api/orgs/{org}", patch(rename_org))
         .route(
             "/api/orgs/{org}/members",
             get(list_members).post(add_member),
@@ -205,12 +206,7 @@ async fn create_org(
     State(state): State<Arc<AppState>>,
     Json(body): Json<NewOrg>,
 ) -> Result<(StatusCode, Json<Org>), Response> {
-    let name = body.name.trim();
-    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
-        return Err(bad_request(
-            "Give the organisation a name of up to 100 characters.",
-        ));
-    }
+    let name = validate_name(&body.name).map_err(bad_request)?;
     let slug = match body
         .slug
         .as_deref()
@@ -265,6 +261,42 @@ struct Member {
     role_id: i64,
     role_name: String,
     added_at: String,
+}
+
+#[derive(Deserialize)]
+struct RenameOrg {
+    name: String,
+}
+
+/// PATCH /api/orgs/{org} — change the display name (admins, or `manage-orgs` in that org).
+/// The slug stays: it's the URL and the org's folder in storage.
+async fn rename_org(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+    Json(body): Json<RenameOrg>,
+) -> Result<Json<Org>, Response> {
+    let (org, _) = managed_org(&state, &user, &slug).await?;
+    let name = validate_name(&body.name).map_err(bad_request)?;
+    let renamed: Org =
+        sqlx::query_as("UPDATE organisations SET name = ? WHERE id = ? RETURNING id, slug, name")
+            .bind(name)
+            .bind(org.id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(db_error)?;
+    tracing::info!(org = %org.slug, from = %org.name, to = %renamed.name, user = user.id, "organisation renamed");
+    Ok(Json(renamed))
+}
+
+/// A trimmed organisation name: 1–100 characters.
+pub fn validate_name(raw: &str) -> Result<&str, &'static str> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
+        Err("Give the organisation a name of up to 100 characters.")
+    } else {
+        Ok(name)
+    }
 }
 
 /// The org, if the user may manage its members, plus the user's own permissions there
@@ -507,5 +539,19 @@ mod tests {
             assert!(validate_slug(bad).is_err(), "{bad:?} should be rejected");
         }
         assert!(validate_slug(&"a".repeat(MAX_SLUG_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn names_are_trimmed_and_bounded() {
+        assert_eq!(validate_name("  Acme Ltd ").unwrap(), "Acme Ltd");
+        assert!(validate_name("   ").is_err());
+        assert_eq!(
+            validate_name(&"é".repeat(MAX_NAME_CHARS))
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_NAME_CHARS
+        );
+        assert!(validate_name(&"x".repeat(MAX_NAME_CHARS + 1)).is_err());
     }
 }

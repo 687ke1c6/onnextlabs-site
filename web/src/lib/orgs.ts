@@ -58,6 +58,13 @@ export const fetchManageableOrgs = async () =>
 export const createOrg = async (name: string, slug: string) =>
   json<Org>(await send("POST", "/api/manage/orgs", { name, slug }), "Couldn't create the organisation.");
 
+/** Admins, or `manage-orgs` in that org. The slug never changes. */
+export const renameOrg = async (slug: string, name: string) =>
+  json<{ id: number; slug: string; name: string }>(
+    await send("PATCH", `/api/orgs/${encodeURIComponent(slug)}`, { name }),
+    "Couldn't rename the organisation.",
+  );
+
 const membersUrl = (org: string) => `/api/orgs/${encodeURIComponent(org)}/members`;
 
 export const fetchMembers = async (org: string) => json<Member[]>(await fetch(membersUrl(org)), "Couldn't load members.");

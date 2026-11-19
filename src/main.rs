@@ -115,6 +115,8 @@ enum Command {
         #[arg(long)]
         slug: Option<String>,
     },
+    /// Rename an organisation (its slug, the URL and folder name, stays the same).
+    RenameOrg { org: String, name: String },
     /// Add a user (by email) to an organisation, or change their role there. They must have
     /// signed in once.
     AddMember {
@@ -168,6 +170,7 @@ async fn main() {
             Command::CreateOrg { name, slug } => {
                 users::create_org(&db, &name, slug.as_deref()).await
             }
+            Command::RenameOrg { org, name } => users::rename_org(&db, &org, &name).await,
             Command::AddMember { org, email, role } => {
                 users::add_member(&db, &org, &email, &role).await
             }

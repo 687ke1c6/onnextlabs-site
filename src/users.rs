@@ -69,10 +69,7 @@ pub async fn list_users(db: &SqlitePool) -> Result<()> {
 
 /// Creates an org. The slug (URL and folder name) is derived from the name unless given.
 pub async fn create_org(db: &SqlitePool, name: &str, slug: Option<&str>) -> Result<()> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("organisation name can't be empty".into());
-    }
+    let name = crate::orgs::validate_name(name)?;
     let slug = slug
         .map(str::to_owned)
         .unwrap_or_else(|| crate::orgs::slugify(name));
@@ -89,6 +86,19 @@ pub async fn create_org(db: &SqlitePool, name: &str, slug: Option<&str>) -> Resu
             e => Box::<dyn std::error::Error>::from(e),
         })?;
     println!("created {name} at /portal/{slug}");
+    Ok(())
+}
+
+/// Changes an organisation's display name (its slug stays).
+pub async fn rename_org(db: &SqlitePool, slug: &str, name: &str) -> Result<()> {
+    let name = crate::orgs::validate_name(name)?;
+    let id = org_id_by_slug(db, slug).await?;
+    sqlx::query("UPDATE organisations SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id)
+        .execute(db)
+        .await?;
+    println!("renamed /portal/{slug} to {name}");
     Ok(())
 }
 
