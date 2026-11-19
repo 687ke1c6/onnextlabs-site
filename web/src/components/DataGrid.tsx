@@ -22,6 +22,8 @@ import ChevronLeft from "lucide-solid/icons/chevron-left";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import Columns3 from "lucide-solid/icons/columns-3";
 import Funnel from "lucide-solid/icons/funnel";
+import MoveHorizontal from "lucide-solid/icons/move-horizontal";
+import Rows3 from "lucide-solid/icons/rows-3";
 import Search from "lucide-solid/icons/search";
 import X from "lucide-solid/icons/x";
 import { Button } from "~/components/ui/button";
@@ -389,42 +391,35 @@ export function DataGrid<T>(props: {
             <ChevronRight size={12} />
           </Button>
         </div>
-        <div class="flex items-center gap-3 sm:border-l sm:border-border sm:pl-3">
-          <ToggleSwitch label="Compact" hint="One line per row, all the same height" on={compact()} onChange={setCompactGrids} />
-          <ToggleSwitch label="Wide" hint="Use the full width of the window" on={wideGrids()} onChange={setWideGrids} />
+        <div class="flex items-center gap-1 sm:border-l sm:border-border sm:pl-2">
+          <ToggleButton label="Compact" hint="One line per row, all the same height" icon={Rows3} on={compact()} onChange={setCompactGrids} />
+          <ToggleButton label="Wide" hint="Use the full width of the window" icon={MoveHorizontal} on={wideGrids()} onChange={setWideGrids} />
         </div>
       </div>
     </div>
   );
 }
 
-/**
- * A labelled on/off switch. Not named `Switch`: Solid's compiler turns every `<Switch>` tag into
- * its built-in control-flow component, even when a local component has that name.
- */
-function ToggleSwitch(props: { label: string; hint: string; on: boolean; onChange: (on: boolean) => void }) {
+/** A quiet on/off button for view settings: muted when off, lightly highlighted when on. */
+function ToggleButton(props: {
+  label: string;
+  hint: string;
+  icon: typeof Rows3;
+  on: boolean;
+  onChange: (on: boolean) => void;
+}) {
   return (
     <button
       type="button"
-      role="switch"
-      aria-checked={props.on}
+      aria-pressed={props.on}
       title={props.hint}
       onClick={() => props.onChange(!props.on)}
-      class="inline-flex items-center gap-1.5 rounded text-[11px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class={cn(
+        "inline-flex h-5 items-center gap-1 rounded px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        props.on ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+      )}
     >
-      <span
-        class={cn(
-          "relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full border border-transparent transition-colors",
-          props.on ? "bg-primary" : "bg-input",
-        )}
-      >
-        <span
-          class={cn(
-            "inline-block h-2.5 w-2.5 rounded-full bg-background shadow transition-transform",
-            props.on ? "translate-x-2.5" : "translate-x-0",
-          )}
-        />
-      </span>
+      <props.icon size={12} />
       {props.label}
     </button>
   );
