@@ -21,8 +21,34 @@ function remembered(key: string, initial: boolean) {
   return [get, update] as const;
 }
 
-/** Grids: one line per row, all the same height. */
-export const [compactGrids, setCompactGrids] = remembered("grid-compact", false);
+/**
+ * Grids: how tightly rows are packed. `compact`: one line per row, all the same height.
+ * `condensed`: that, with smaller text and less padding.
+ */
+export type Density = "normal" | "compact" | "condensed";
+export const DENSITIES: Density[] = ["normal", "compact", "condensed"];
+
+function rememberedDensity() {
+  let start: Density = "normal";
+  try {
+    const saved = localStorage.getItem("grid-density");
+    if (DENSITIES.includes(saved as Density)) start = saved as Density;
+    else if (localStorage.getItem("grid-compact") === "1") start = "compact"; // the old on/off setting
+  } catch {
+    // storage blocked: use the default
+  }
+  const [get, set] = createSignal<Density>(start);
+  const update = (v: Density) => {
+    set(v);
+    try {
+      localStorage.setItem("grid-density", v);
+    } catch {
+      // just don't remember
+    }
+  };
+  return [get, update] as const;
+}
+export const [gridDensity, setGridDensity] = rememberedDensity();
 
 /** Grids: let the page use the full window width. */
 export const [wideGrids, setWideGrids] = remembered("grid-wide", false);

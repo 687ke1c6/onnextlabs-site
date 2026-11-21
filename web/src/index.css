@@ -70,3 +70,17 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; }
 }
+
+/* Coverage timeline (Statements > Uploads). Dark by default like the rest; `.light` swaps in
+   the light steps. Saved = blue, this statement = aqua, gap = critical red (always hatched
+   and labelled, never colour alone). Validated with the dataviz palette checks. */
+.coverage-viz {
+  --viz-saved: #3987e5;
+  --viz-pending: #199e70;
+  --viz-gap: #d03b3b;
+}
+.light .coverage-viz {
+  --viz-saved: #2a78d6;
+  --viz-pending: #1baf7a;
+  --viz-gap: #d03b3b;
+}

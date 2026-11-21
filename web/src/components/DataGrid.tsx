@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
-import { Portal } from "solid-js/web";
+import { Dynamic, Portal } from "solid-js/web";
 import {
   type ColumnDef,
   type ColumnFiltersState,
@@ -23,7 +23,9 @@ import ChevronRight from "lucide-solid/icons/chevron-right";
 import Columns3 from "lucide-solid/icons/columns-3";
 import Funnel from "lucide-solid/icons/funnel";
 import MoveHorizontal from "lucide-solid/icons/move-horizontal";
+import Rows2 from "lucide-solid/icons/rows-2";
 import Rows3 from "lucide-solid/icons/rows-3";
+import Rows4 from "lucide-solid/icons/rows-4";
 import Search from "lucide-solid/icons/search";
 import X from "lucide-solid/icons/x";
 import { Button } from "~/components/ui/button";
@@ -31,10 +33,12 @@ import { Input } from "~/components/ui/input";
 import { Menu, menuItemClass, MenuSeparator } from "~/components/ui/menu";
 import { cn } from "~/lib/utils";
 import {
-  compactGrids,
   gridMounted,
   gridUnmounted,
-  setCompactGrids,
+  DENSITIES,
+  type Density,
+  gridDensity,
+  setGridDensity,
   setWideGrids,
   wideGridMounted,
   wideGridUnmounted,
@@ -136,7 +140,9 @@ export function DataGrid<T>(props: {
     onMount(wideGridMounted);
     onCleanup(wideGridUnmounted);
   }
-  const compact = compactGrids;
+  // Compact and condensed both keep each row to one line; condensed also shrinks it.
+  const compact = () => gridDensity() !== "normal";
+  const condensed = () => gridDensity() === "condensed";
 
   const table = createSolidTable<T>({
     get data() {
@@ -299,7 +305,15 @@ export function DataGrid<T>(props: {
 
       {/* Table */}
       <div class="min-h-0 flex-1 overflow-auto rounded-xl border border-border">
-        <table class={cn("w-full min-w-[44rem] text-sm", compact() && "table-fixed")}>
+        <table
+          class={cn(
+            "w-full min-w-[44rem]",
+            compact() && "table-fixed",
+            // Condensed: everything in a cell at 11px, including bits that set their own size
+            // (type pills, dropdowns), and shorter dropdowns.
+            condensed() ? "text-[11px] [&_td_*]:text-[11px]! [&_td_select]:h-[18px]! [&_td_select]:py-0!" : "text-sm",
+          )}
+        >
           {/* Pinned while the rows scroll; opaque so rows don't show through. */}
           <thead class="sticky top-0 z-10 bg-background text-left text-xs text-muted-foreground shadow-[inset_0_-1px_0_var(--color-border)]">
             <For each={table.getHeaderGroups()}>
@@ -311,7 +325,7 @@ export function DataGrid<T>(props: {
                       const sorted = () => h.column.getIsSorted();
                       return (
                         <th
-                          class={cn("px-4 py-2 font-medium", m.width, m.align === "right" && "text-right")}
+                          class={cn(condensed() ? "px-3 py-1" : "px-4 py-2", "font-medium", m.width, m.align === "right" && "text-right")}
                           aria-sort={sorted() === "asc" ? "ascending" : sorted() === "desc" ? "descending" : "none"}
                         >
                           <div class={cn("inline-flex items-center gap-1", m.align === "right" && "flex-row-reverse")}>
@@ -378,8 +392,8 @@ export function DataGrid<T>(props: {
                     {(cell) => (
                       <td
                         class={cn(
-                          "px-4 align-top",
-                          compact() ? "py-1.5" : "py-2",
+                          "align-top",
+                          condensed() ? "px-3 py-0.5" : compact() ? "px-4 py-1.5" : "px-4 py-2",
                           meta<T>(cell.column.columnDef.meta).align === "right" && "text-right",
                         )}
                         // Compact cuts long text off; hovering shows all of it.
@@ -431,12 +445,39 @@ export function DataGrid<T>(props: {
             </Button>
           </div>
           <div class="flex items-center gap-1 sm:border-l sm:border-border sm:pl-2">
-            <ToggleButton label="Compact" hint="One line per row, all the same height" icon={Rows3} on={compact()} onChange={setCompactGrids} />
+            <DensityButton />
             <ToggleButton label="Wide" hint="Use the full width of the window" icon={MoveHorizontal} on={wideGrids()} onChange={setWideGrids} />
           </div>
         </div>
       </Show>
     </div>
+  );
+}
+
+const DENSITY: Record<Density, { label: string; icon: typeof Rows3; hint: string }> = {
+  normal: { label: "Normal", icon: Rows2, hint: "Rows wrap to fit their text" },
+  compact: { label: "Compact", icon: Rows3, hint: "One line per row, all the same height" },
+  condensed: { label: "Condensed", icon: Rows4, hint: "One line per row, smaller text" },
+};
+
+/** Row density for every grid: each click moves to the next of normal, compact, condensed. */
+function DensityButton() {
+  const d = () => DENSITY[gridDensity()];
+  const next = () => DENSITIES[(DENSITIES.indexOf(gridDensity()) + 1) % DENSITIES.length];
+  return (
+    <button
+      type="button"
+      title={`${d().hint}. Click for ${DENSITY[next()].label.toLowerCase()}.`}
+      aria-label={`Row density: ${d().label}. Click for ${DENSITY[next()].label.toLowerCase()}.`}
+      onClick={() => setGridDensity(next())}
+      class={cn(
+        "inline-flex h-5 items-center gap-1 rounded px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        gridDensity() === "normal" ? "text-muted-foreground hover:bg-accent/60 hover:text-foreground" : "bg-accent text-foreground",
+      )}
+    >
+      <Dynamic component={d().icon} size={12} />
+      {d().label}
+    </button>
   );
 }
 

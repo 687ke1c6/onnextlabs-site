@@ -2,7 +2,7 @@
   "name": "onnextlabs-web",
   "private": true,
   "packageManager": "bun@1.4.3",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "bun --bun vite",
@@ -15,6 +15,8 @@
     "altcha": "3.5.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "d3-scale": "4.0.2",
+    "d3-time": "3.1.0",
     "lucide-solid": "^1.72.0",
     "solid-js": "^1.9.0",
     "tailwind-merge": "^3.0.0"
@@ -22,6 +24,8 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",
     "@types/bun": "^1.4.0",
+    "@types/d3-scale": "4.0.9",
+    "@types/d3-time": "3.0.4",
     "tailwindcss": "^4.1.0",
     "tw-animate-css": "^1.3.0",
     "typescript": "^5.8.0",

@@ -178,31 +178,43 @@ function AccountPicker(props: { state: AccountState; onNew: () => void }) {
   const list = () => settled(props.state.accounts) ?? [];
   return (
     <Show when={props.state.account()}>
-      {(current) => (
-        <label class="flex items-center gap-2 text-sm">
-          <span class="text-muted-foreground">Account</span>
-          <select
-            value={selectValue(String(current().id), list())}
-            onChange={(e) => {
-              const value = e.currentTarget.value;
-              if (value === NEW_ACCOUNT) {
-                e.currentTarget.value = String(current().id);
-                props.onNew();
-              } else {
-                props.state.pick(Number(value));
-              }
-            }}
-            class="h-9 min-w-[12rem] rounded-md border border-input bg-background px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="Account"
-          >
-            <For each={list()}>{(a) => <option value={String(a.id)}>{a.name}</option>}</For>
-            <Show when={can(org, "write-statements")}>
-              <option disabled>──────────</option>
-              <option value={NEW_ACCOUNT}>New account…</option>
-            </Show>
-          </select>
-        </label>
-      )}
+      {(current) => {
+        let select!: HTMLSelectElement;
+        // A reload (e.g. after editing an account) re-creates every <option>. While they're
+        // swapped the browser selects the first one it can ("New account…"), and the value
+        // binding runs before the new options are in. A user effect runs after rendering, so
+        // it puts the current account back.
+        createEffect(() => {
+          list();
+          select.value = String(current().id);
+        });
+        return (
+          <label class="flex items-center gap-2 text-sm">
+            <span class="text-muted-foreground">Account</span>
+            <select
+              ref={select}
+              value={selectValue(String(current().id), list())}
+              onChange={(e) => {
+                const value = e.currentTarget.value;
+                if (value === NEW_ACCOUNT) {
+                  e.currentTarget.value = String(current().id);
+                  props.onNew();
+                } else {
+                  props.state.pick(Number(value));
+                }
+              }}
+              class="h-9 min-w-[12rem] rounded-md border border-input bg-background px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label="Account"
+            >
+              <For each={list()}>{(a) => <option value={String(a.id)}>{a.name}</option>}</For>
+              <Show when={can(org, "write-statements")}>
+                <option disabled>──────────</option>
+                <option value={NEW_ACCOUNT}>New account…</option>
+              </Show>
+            </select>
+          </label>
+        );
+      }}
     </Show>
   );
 }
