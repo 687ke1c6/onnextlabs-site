@@ -1,6 +1,6 @@
 [package]
 name = "db-server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "The site's SQLite database behind HTTP: one-off statements and atomic batches as JSON."
 
