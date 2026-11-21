@@ -134,7 +134,14 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
             "/api/orgs/{org}/statement-accounts/{id}/rules",
             get(get_rules).put(put_rules),
         )
-        .route("/api/orgs/{org}/statement-rules/test", post(test_rules))
+        .route(
+            "/api/orgs/{org}/statement-accounts/{id}/rules/apply/preview",
+            post(apply_preview),
+        )
+        .route(
+            "/api/orgs/{org}/statement-accounts/{id}/rules/apply",
+            post(apply_rules),
+        )
 }
 
 // ---- reading and parsing an upload ----
@@ -310,7 +317,8 @@ struct Preview {
     /// The account it would be saved into, and how the stated number compares with it.
     account: Account,
     account_check: AccountCheck,
-    /// On a mismatch: another account whose identifier is the stated number, if there is one.
+    /// On a mismatch, or when the account has no identifier: another account whose identifier
+    /// is the stated number, if there is one (so the stated number can't be given to this one).
     suggested_account: Option<Account>,
     first_date: Option<String>,
     last_date: Option<String>,
@@ -360,7 +368,10 @@ async fn preview(
     let stored = stored_types(&state.db, account.id).await?;
     let stated = stated_account(&st);
     let account_check = check_account(&account, &stated);
-    let suggested_account = if account_check == AccountCheck::Mismatch {
+    let suggested_account = if matches!(
+        account_check,
+        AccountCheck::Mismatch | AccountCheck::NoIdentifier
+    ) {
         statement_accounts::with_identifier(&state.db, org.id, &stated).await?
     } else {
         None
@@ -1133,47 +1144,192 @@ async fn put_rules(
     }))
 }
 
+// ---- applying saved rules to stored rows ----
+
 #[derive(Deserialize)]
-struct TestBody {
-    /// The rules being edited (not necessarily saved).
-    rules: Vec<RuleJson>,
+struct ApplyScope {
+    /// 0-based index of one saved rule; `None` = all of them.
+    #[serde(default)]
+    rule: Option<usize>,
+}
+
+/// A stored row whose type the saved rules would change.
+#[derive(Serialize, Debug, PartialEq)]
+struct TypeChange {
+    /// The row's own id.
+    id: i64,
+    date: String,
     description: String,
     amount: String,
+    currency: String,
+    /// Its type now, and the type the rule gives it.
+    from: Option<String>,
+    to: String,
+    /// 0-based index of the rule that matches it first.
+    rule: usize,
+}
+
+#[derive(Deserialize)]
+struct StoredRow {
+    id: i64,
+    date: String,
+    description: String,
+    amount: String,
+    currency: String,
+    #[serde(rename = "type")]
+    category: Option<String>,
+    type_manual: bool,
+}
+
+/// The rows in the account the saved rules would retype, as saving a statement would:
+/// the first matching rule wins, a hand-set type is never changed, and a row no rule
+/// matches keeps its type. With `only`, just the rows that rule is the first match for.
+async fn type_changes(
+    db: &Db,
+    account_id: i64,
+    only: Option<usize>,
+) -> Result<Vec<TypeChange>, Response> {
+    let rules = account_rules(db, account_id).await?;
+    if only.is_some_and(|i| i >= rules.len()) {
+        return Err(bad_request(
+            "That rule isn't saved. Save the rules and try again.",
+        ));
+    }
+    let rows: Vec<StoredRow> = db::query_as(
+        "SELECT id, date, description, amount, currency, type, type_manual
+         FROM statement_transactions WHERE account_id = ? AND type_manual = 0
+         ORDER BY date DESC, id DESC",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await
+    .map_err(db_error)?;
+    Ok(changes_for(&rules, rows, only))
+}
+
+fn changes_for(
+    rules: &[CategoryRule],
+    rows: Vec<StoredRow>,
+    only: Option<usize>,
+) -> Vec<TypeChange> {
+    // Rules aren't limited by format any more; any format matches the same way.
+    let format = Format::ALL[0];
+    rows.into_iter()
+        .filter(|r| !r.type_manual)
+        .filter_map(|r| {
+            let t = Transaction {
+                id: 0,
+                date: r.date,
+                description: r.description,
+                amount: r.amount,
+                currency: r.currency,
+                category: None,
+            };
+            let rule = rules.iter().position(|rule| rule.matches(&t, format))?;
+            if only.is_some_and(|i| i != rule) {
+                return None;
+            }
+            let to = rules[rule].category.clone();
+            (r.category.as_deref() != Some(to.as_str())).then_some(TypeChange {
+                id: r.id,
+                date: t.date,
+                description: t.description,
+                amount: t.amount,
+                currency: t.currency,
+                from: r.category,
+                to,
+                rule,
+            })
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
-struct TestResult {
-    /// 0-based index of the first matching rule.
-    rule: Option<usize>,
-    #[serde(rename = "type")]
-    category: Option<String>,
+struct ApplyPreview {
+    changes: Vec<TypeChange>,
 }
 
-/// POST /api/orgs/{org}/statement-rules/test — which rule would set the type of a
-/// description and amount. Uses the same matching as saving a statement.
-async fn test_rules(
+/// POST /api/orgs/{org}/statement-accounts/{id}/rules/apply/preview — the stored rows the
+/// saved rules (or one of them, `{"rule": i}`) would retype. Changes nothing.
+async fn apply_preview(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    UrlPath(slug): UrlPath<String>,
-    Json(body): Json<TestBody>,
-) -> Result<Json<TestResult>, Response> {
-    rbac::authorize(&state.db, &user, &slug, Permission::ReadStatements).await?;
-    let rules = validate_rules(&body.rules)?;
-    // Rules aren't limited by format any more; any format matches the same way.
-    let format = Format::ALL[0];
-    let t = Transaction {
-        id: 0,
-        date: String::new(),
-        description: body.description,
-        amount: body.amount.trim().to_string(),
-        currency: String::new(),
-        category: None,
-    };
-    let rule = rules.iter().position(|r| r.matches(&t, format));
-    Ok(Json(TestResult {
-        rule,
-        category: rule.map(|i| rules[i].category.clone()),
+    UrlPath((slug, account_id)): UrlPath<(String, i64)>,
+    Json(scope): Json<ApplyScope>,
+) -> Result<Json<ApplyPreview>, Response> {
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
+    statement_accounts::find(&state.db, org.id, account_id).await?;
+    Ok(Json(ApplyPreview {
+        changes: type_changes(&state.db, account_id, scope.rule).await?,
     }))
+}
+
+#[derive(Deserialize)]
+struct ApplyBody {
+    #[serde(default)]
+    rule: Option<usize>,
+    /// The changes the user accepted, row id -> the type they were shown.
+    accepted: HashMap<i64, String>,
+}
+
+#[derive(Serialize)]
+struct Applied {
+    updated: u64,
+}
+
+/// POST /api/orgs/{org}/statement-accounts/{id}/rules/apply — retype the accepted rows.
+/// Worked out again first: a row is only changed if the rules still give it the type the
+/// user saw (so rules or rows changed in between can't apply something unseen).
+async fn apply_rules(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath((slug, account_id)): UrlPath<(String, i64)>,
+    Json(body): Json<ApplyBody>,
+) -> Result<Json<Applied>, Response> {
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
+    statement_accounts::find(&state.db, org.id, account_id).await?;
+    let updated = apply_changes(&state.db, account_id, body.rule, &body.accepted).await?;
+    tracing::info!(org = %org.slug, account = account_id, rule = ?body.rule, updated, user = user.id, "type rules applied");
+    Ok(Json(Applied { updated }))
+}
+
+/// Sets the type of each accepted row the saved rules still give that type; how many changed.
+async fn apply_changes(
+    db: &Db,
+    account_id: i64,
+    only: Option<usize>,
+    accepted: &HashMap<i64, String>,
+) -> Result<u64, Response> {
+    let mut by_type: HashMap<String, Vec<i64>> = HashMap::new();
+    for c in type_changes(db, account_id, only).await? {
+        if accepted.get(&c.id) == Some(&c.to) {
+            by_type.entry(c.to).or_default().push(c.id);
+        }
+    }
+    let mut batch = db::Batch::new();
+    for (typ, ids) in &by_type {
+        batch.push(
+            "UPDATE statement_transactions
+             SET type = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE account_id = ? AND type_manual = 0
+               AND id IN (SELECT value FROM json_each(?))",
+            params![
+                typ,
+                account_id,
+                serde_json::to_string(ids).expect("ids serialise"),
+            ],
+        );
+    }
+    Ok(if by_type.is_empty() {
+        0
+    } else {
+        db::run(db, batch)
+            .await
+            .map_err(db_error)?
+            .iter()
+            .map(|r| r.rows_affected)
+            .sum()
+    })
 }
 
 // ---- errors ----
@@ -1497,6 +1653,89 @@ mod tests {
             .unwrap();
         let rows = org_transactions(&db, org.id, None).await.unwrap();
         assert_eq!(row(&rows, plain), (Some("OTHER".into()), true));
+    }
+
+    #[tokio::test]
+    async fn saved_rules_can_be_applied_to_stored_rows() {
+        let (db, org, user) = test_db().await;
+        store(&db, &org, user, "a.csv", "x", &parsed(&[]), None)
+            .await
+            .unwrap();
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        let account = rows[0].account_id;
+        let cards: Vec<i64> = rows
+            .iter()
+            .filter(|r| r.description.to_uppercase().contains("DEBIT CARD"))
+            .map(|r| r.id)
+            .collect();
+        assert!(cards.len() >= 2, "the sample has card purchases");
+        // One is hand-set: applying rules never touches it.
+        crate::statement_types::set_type(&db, org.id, cards[0], Some("MINE"))
+            .await
+            .unwrap();
+        for (position, (typ, contains)) in [("CARD", "DEBIT CARD"), ("OTHER", "CARD")]
+            .into_iter()
+            .enumerate()
+        {
+            db::query(
+                "INSERT INTO statement_type_rules (org_id, account_id, position, type, contains)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(org.id)
+            .bind(account)
+            .bind(position as i64)
+            .bind(typ)
+            .bind(serde_json::to_string(&[contains]).unwrap())
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        // Rule 1 wins; rule 2 never comes first, so applying it alone changes nothing.
+        let all = type_changes(&db, account, None).await.unwrap();
+        assert_eq!(
+            all.iter().map(|c| c.id).collect::<BTreeSet<_>>(),
+            cards[1..].iter().copied().collect()
+        );
+        assert!(all
+            .iter()
+            .all(|c| c.to == "CARD" && c.rule == 0 && c.from.is_none()));
+        assert!(type_changes(&db, account, Some(1))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(type_changes(&db, account, Some(2)).await.is_err());
+
+        // Only accepted rows, with the type the user saw, are changed.
+        let mut accepted: HashMap<i64, String> = all.iter().map(|c| (c.id, c.to.clone())).collect();
+        let skipped = all[0].id;
+        accepted.remove(&skipped);
+        accepted.insert(cards[0], "CARD".into()); // hand-set: not a change on offer
+        if let Some(c) = all.get(1) {
+            accepted.insert(c.id, "STALE".into()); // not what the rules give now
+        }
+        let stale = all.get(1).map(|c| c.id);
+        let updated = apply_changes(&db, account, None, &accepted).await.unwrap();
+        assert_eq!(
+            updated as usize,
+            all.len() - 1 - usize::from(stale.is_some())
+        );
+
+        let rows = org_transactions(&db, org.id, None).await.unwrap();
+        let typ = |id| rows.iter().find(|r| r.id == id).unwrap().category.clone();
+        assert_eq!(typ(cards[0]).as_deref(), Some("MINE"));
+        assert_eq!(typ(skipped), None);
+        if let Some(id) = stale {
+            assert_eq!(typ(id), None);
+        }
+        // What's left on offer is exactly what wasn't applied.
+        let left: BTreeSet<i64> = type_changes(&db, account, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(left, [Some(skipped), stale].into_iter().flatten().collect());
     }
 
     #[tokio::test]

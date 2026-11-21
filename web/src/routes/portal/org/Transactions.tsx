@@ -370,6 +370,7 @@ function TransactionsView(props: { acct: AccountState }) {
                 defaultHidden={["currency", "txn_id", "updated_at"]}
                 noun={["row", "rows"]}
                 status={(shown) => <AmountStat rows={shown} />}
+                statusBar
                 onRowClick={(r) => setOpenRow(r.id)}
                 // Rows with documents attached: a light blue tint and a thin bar on the left.
                 rowClass={(r) =>

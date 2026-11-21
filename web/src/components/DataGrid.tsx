@@ -30,7 +30,16 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Menu, menuItemClass, MenuSeparator } from "~/components/ui/menu";
 import { cn } from "~/lib/utils";
-import { compactGrids, gridMounted, gridUnmounted, setCompactGrids, setWideGrids, wideGrids } from "~/lib/view";
+import {
+  compactGrids,
+  gridMounted,
+  gridUnmounted,
+  setCompactGrids,
+  setWideGrids,
+  wideGridMounted,
+  wideGridUnmounted,
+  wideGrids,
+} from "~/lib/view";
 
 /** Header filter value meaning "rows where this column is empty". */
 export const EMPTY = "\u0000empty";
@@ -97,6 +106,11 @@ export function DataGrid<T>(props: {
    * filter or search is active (e.g. a sum, shown only when filtering).
    */
   status?: (rows: T[], filtering: boolean) => JSX.Element;
+  /**
+   * Show the status bar: counts, paging and the Compact / Wide view switches. Without it every
+   * row is shown (no paging) and the grid doesn't widen the page.
+   */
+  statusBar?: boolean;
   /** e.g. ["row", "rows"]. */
   noun: [string, string];
   /** Clicking a row (not a control in it) calls this, e.g. to open its details. */
@@ -110,11 +124,18 @@ export function DataGrid<T>(props: {
   const [filters, setFilters] = createSignal<ColumnFiltersState>([]);
   const [query, setQuery] = createSignal("");
   const [visibility, setVisibility] = createSignal<VisibilityState>(initialVisibility(props.storageKey, props.defaultHidden ?? []));
-  const [pagination, setPagination] = createSignal({ pageIndex: 0, pageSize: initialPageSize(props.storageKey) });
+  const [pagination, setPagination] = createSignal({
+    pageIndex: 0,
+    pageSize: props.statusBar ? initialPageSize(props.storageKey) : ALL_ROWS,
+  });
   const firstPage = () => setPagination((p) => ({ ...p, pageIndex: 0 }));
   let searchInput!: HTMLInputElement;
   onMount(gridMounted);
   onCleanup(gridUnmounted);
+  if (props.statusBar) {
+    onMount(wideGridMounted);
+    onCleanup(wideGridUnmounted);
+  }
   const compact = compactGrids;
 
   const table = createSolidTable<T>({
@@ -381,38 +402,40 @@ export function DataGrid<T>(props: {
 
       {/* Status bar: what's shown (and its sum when filtering), paging, view switches. It sticks
           to the bottom of the window, so the figures stay in view while scrolling. */}
-      <div
-        role="status"
-        class="sticky bottom-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border bg-background/95 px-2 py-0.5 text-[11px] leading-5 text-muted-foreground shadow-sm backdrop-blur"
-      >
-        <div class="flex min-w-0 flex-wrap items-center gap-x-2.5">
-          <span class="tabular-nums">
-            {filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}
-          </span>
-          {props.status?.(filtered(), anyFilter())}
+      <Show when={props.statusBar}>
+        <div
+          role="status"
+          class="sticky bottom-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border bg-background/95 px-2 py-0.5 text-[11px] leading-5 text-muted-foreground shadow-sm backdrop-blur"
+        >
+          <div class="flex min-w-0 flex-wrap items-center gap-x-2.5">
+            <span class="tabular-nums">
+              {filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}
+            </span>
+            {props.status?.(filtered(), anyFilter())}
+          </div>
+          <div class="flex flex-wrap items-center gap-1.5 sm:ml-auto">
+            <label class="flex items-center gap-1">
+              Per page
+              <select class={cn(SELECT, "h-5 rounded px-1 text-[11px]")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
+                <For each={PAGE_SIZES}>{(n) => <option value={n}>{n === ALL_ROWS ? "All" : n}</option>}</For>
+              </select>
+            </label>
+            <span class="tabular-nums">
+              {firstShown()}–{lastShown()} of {filtered().length}
+            </span>
+            <Button variant="ghost" size="sm" class="h-5 rounded px-1" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} aria-label="Previous page">
+              <ChevronLeft size={12} />
+            </Button>
+            <Button variant="ghost" size="sm" class="h-5 rounded px-1" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} aria-label="Next page">
+              <ChevronRight size={12} />
+            </Button>
+          </div>
+          <div class="flex items-center gap-1 sm:border-l sm:border-border sm:pl-2">
+            <ToggleButton label="Compact" hint="One line per row, all the same height" icon={Rows3} on={compact()} onChange={setCompactGrids} />
+            <ToggleButton label="Wide" hint="Use the full width of the window" icon={MoveHorizontal} on={wideGrids()} onChange={setWideGrids} />
+          </div>
         </div>
-        <div class="flex flex-wrap items-center gap-1.5 sm:ml-auto">
-          <label class="flex items-center gap-1">
-            Per page
-            <select class={cn(SELECT, "h-5 rounded px-1 text-[11px]")} value={pagination().pageSize} onChange={(e) => table.setPageSize(Number(e.currentTarget.value))}>
-              <For each={PAGE_SIZES}>{(n) => <option value={n}>{n === ALL_ROWS ? "All" : n}</option>}</For>
-            </select>
-          </label>
-          <span class="tabular-nums">
-            {firstShown()}–{lastShown()} of {filtered().length}
-          </span>
-          <Button variant="ghost" size="sm" class="h-5 rounded px-1" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} aria-label="Previous page">
-            <ChevronLeft size={12} />
-          </Button>
-          <Button variant="ghost" size="sm" class="h-5 rounded px-1" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} aria-label="Next page">
-            <ChevronRight size={12} />
-          </Button>
-        </div>
-        <div class="flex items-center gap-1 sm:border-l sm:border-border sm:pl-2">
-          <ToggleButton label="Compact" hint="One line per row, all the same height" icon={Rows3} on={compact()} onChange={setCompactGrids} />
-          <ToggleButton label="Wide" hint="Use the full width of the window" icon={MoveHorizontal} on={wideGrids()} onChange={setWideGrids} />
-        </div>
-      </div>
+      </Show>
     </div>
   );
 }

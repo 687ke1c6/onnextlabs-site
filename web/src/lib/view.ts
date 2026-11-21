@@ -38,5 +38,10 @@ export const gridUnmounted = () => setGridsShown((n) => Math.max(0, n - 1));
  */
 export const pageHasGrid = () => gridsShown() > 0;
 
+// Only grids with a status bar offer Wide, so only they widen the page.
+const [wideGridsShown, setWideGridsShown] = createSignal(0);
+export const wideGridMounted = () => setWideGridsShown((n) => n + 1);
+export const wideGridUnmounted = () => setWideGridsShown((n) => Math.max(0, n - 1));
+
 /** Whether the portal's content area should drop its max width. */
-export const pageIsWide = () => wideGrids() && gridsShown() > 0;
+export const pageIsWide = () => wideGrids() && wideGridsShown() > 0;

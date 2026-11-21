@@ -41,7 +41,7 @@ export type Preview = {
   /** The account it would be saved into. */
   account: Account;
   account_check: AccountCheck;
-  /** On a mismatch: another account whose identifier is the stated number, if any. */
+  /** On a mismatch or no_identifier: another account whose identifier is the stated number, if any. */
   suggested_account: Account | null;
   first_date: string | null;
   last_date: string | null;
@@ -158,11 +158,38 @@ export const fetchRules = async (org: string, account: number) =>
 export const saveRules = async (org: string, account: number, rules: Rule[]) =>
   json<{ rules: Rule[] }>(await send("PUT", `${accounts(org)}/${account}/rules`, { rules }), "Couldn't save the type rules.");
 
-/** Which of `rules` (saved or not) would set the type of this description and amount. */
-export const testRules = async (org: string, rules: Rule[], description: string, amount: string) =>
-  json<{ rule: number | null; type: string | null }>(
-    await send("POST", `${base(org)}/statement-rules/test`, { rules, description, amount }),
-    "Couldn't test the rules.",
+/** A stored row whose type the saved rules would change. */
+export type TypeChange = {
+  /** The row's own id. */
+  id: number;
+  date: string;
+  description: string;
+  amount: string;
+  currency: string;
+  from: string | null;
+  to: string;
+  /** 0-based index of the rule that matches it first. */
+  rule: number;
+};
+
+/**
+ * The stored rows in the account the saved rules (or just rule `rule`, 0-based) would retype.
+ * Hand-set types and rows no rule matches are left out, as when saving a statement.
+ */
+export const previewApplyRules = async (org: string, account: number, rule: number | null) =>
+  json<{ changes: TypeChange[] }>(
+    await send("POST", `${accounts(org)}/${account}/rules/apply/preview`, { rule }),
+    "Couldn't work out which rows would change.",
+  );
+
+/** Retype the accepted rows (only those the rules still give the type shown). */
+export const applyRules = async (org: string, account: number, rule: number | null, changes: TypeChange[]) =>
+  json<{ updated: number }>(
+    await send("POST", `${accounts(org)}/${account}/rules/apply`, {
+      rule,
+      accepted: Object.fromEntries(changes.map((c) => [c.id, c.to])),
+    }),
+    "Couldn't apply the rules.",
   );
 
 // ---- display helpers ----

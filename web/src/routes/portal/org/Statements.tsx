@@ -22,6 +22,7 @@ import {
   previewStatement,
   saveStatement,
   type UploadSummary,
+  updateAccount,
 } from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
 import { Allowed } from "~/routes/portal/Layout";
@@ -35,10 +36,28 @@ const errorText = (e: unknown, fallback: string) => (e instanceof Error ? e.mess
 /**
  * How the account number the statement states compares with the account it's going into.
  * A mismatch doesn't stop the save; it's there to catch the wrong account being selected.
+ * When the account has no identifier yet, the stated number can be given to it.
  */
-function AccountCheckBanner(props: { preview: Preview; onSwitch: (id: number) => void }) {
+function AccountCheckBanner(props: {
+  preview: Preview;
+  onSwitch: (id: number) => void;
+  onSetIdentifier: (identifier: string) => Promise<void>;
+}) {
   const p = () => props.preview;
   const stated = () => p().account_number ?? "";
+  const [setting, setSetting] = createSignal(false);
+  const [setError, setSetError] = createSignal<string | null>(null);
+  const setIdentifier = async () => {
+    setSetError(null);
+    setSetting(true);
+    try {
+      await props.onSetIdentifier(stated());
+    } catch (e) {
+      setSetError(errorText(e, "Couldn't save the account."));
+    } finally {
+      setSetting(false);
+    }
+  };
   return (
     <Switch>
       <Match when={p().account_check === "match"}>
@@ -78,14 +97,41 @@ function AccountCheckBanner(props: { preview: Preview; onSwitch: (id: number) =>
         </div>
       </Match>
       <Match when={p().account_check === "no_identifier"}>
-        <p class="mt-4 flex items-start gap-2 rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">
+        <div class="mt-4 flex items-start gap-2 rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">
           <Info size={16} class="mt-0.5 shrink-0" />
-          <span>
-            The statement is for account <span class="font-mono text-foreground">{stated()}</span>.{" "}
-            <span class="font-medium text-foreground">{p().account.name}</span> has no identifier, so it can't be checked. Add one under
-            Accounts to have statements checked.
-          </span>
-        </p>
+          <div class="flex-1">
+            <p>
+              The statement is for account <span class="font-mono text-foreground">{stated()}</span>.{" "}
+              <span class="font-medium text-foreground">{p().account.name}</span> has no identifier, so it can't be checked.
+            </p>
+            <Show
+              when={p().suggested_account}
+              fallback={
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="outline" class="h-7" disabled={setting()} onClick={() => void setIdentifier()}>
+                    <Show when={setting()}>
+                      <Loader2 size={14} class="animate-spin" />
+                    </Show>
+                    Set {p().account.name}'s identifier to <span class="font-mono">{stated()}</span>
+                  </Button>
+                  <span>so later statements are checked against it.</span>
+                </div>
+              }
+            >
+              {(other) => (
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <span>
+                    <span class="font-medium text-foreground">{other().name}</span> has that identifier.
+                  </span>
+                  <Button size="sm" variant="outline" class="h-7" onClick={() => props.onSwitch(other().id)}>
+                    Switch to {other().name}
+                  </Button>
+                </div>
+              )}
+            </Show>
+            <Show when={setError()}>{(msg) => <p class="mt-1 text-destructive">{msg()}</p>}</Show>
+          </div>
+        </div>
       </Match>
       <Match when={p().account_check === "not_stated"}>
         <p class="mt-4 flex items-start gap-2 rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">
@@ -97,7 +143,13 @@ function AccountCheckBanner(props: { preview: Preview; onSwitch: (id: number) =>
   );
 }
 
-function UploadPanel(props: { account: () => Account; onSaved: (accountId: number) => void; onSwitch: (id: number) => void }) {
+function UploadPanel(props: {
+  account: () => Account;
+  onSaved: (accountId: number) => void;
+  onSwitch: (id: number) => void;
+  /** The account itself changed (e.g. its identifier was set from the preview). */
+  onAccountChanged: () => void;
+}) {
   const org = useOrg();
   const navigate = useNavigate();
   let fileInput!: HTMLInputElement;
@@ -161,6 +213,15 @@ function UploadPanel(props: { account: () => Account; onSaved: (accountId: numbe
       { defer: true },
     ),
   );
+
+  // Give the account the identifier the statement states, then check the statement again.
+  const setIdentifier = async (identifier: string) => {
+    const a = props.account();
+    await updateAccount(org.slug, a.id, a.name, identifier);
+    props.onAccountChanged();
+    const f = file();
+    if (f) await read(f);
+  };
 
   const save = async () => {
     const f = file();
@@ -261,7 +322,7 @@ function UploadPanel(props: { account: () => Account; onSaved: (accountId: numbe
               <Fact label="Period" value={formatPeriod(p().first_date, p().last_date)} />
               <Fact label="Rows" value={`${p().rows} (${shownRows().filter((t) => t.type).length} typed)`} />
             </dl>
-            <AccountCheckBanner preview={p()} onSwitch={props.onSwitch} />
+            <AccountCheckBanner preview={p()} onSwitch={props.onSwitch} onSetIdentifier={setIdentifier} />
             <p class="mt-3 text-sm text-muted-foreground">
               {p().new} new {p().new === 1 ? "row" : "rows"}
               <Show when={p().existing > 0}>
@@ -438,7 +499,6 @@ function UploadsList(props: { acct: AccountState }) {
             storageKey="statements-uploads-columns"
             defaultHidden={["rows_new", "rows_updated"]}
             noun={["statement", "statements"]}
-            status={(shown) => <span class="tabular-nums">{shown.reduce((n, u) => n + u.rows_parsed, 0)} rows in them</span>}
           />
         )}
       </Show>
@@ -457,6 +517,7 @@ function Uploads() {
             <UploadPanel
               account={account}
               onSwitch={(id) => acct.pick(id)}
+              onAccountChanged={() => acct.reload()}
               onSaved={(id) => {
                 acct.pick(id);
                 acct.reload(); // its row and statement counts changed
