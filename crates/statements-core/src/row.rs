@@ -70,11 +70,14 @@ impl Column {
     }
 
     /// The typed cell written to the sheet: `id` and `amount` as numbers, `date` as a date, the rest as text.
+    /// Thousands separators (`-5,009.49` in `sb_pdf_csv` statements) are dropped for the number only; the
+    /// raw amount, which is part of the id, is unchanged.
     pub fn cell(self, t: &Transaction) -> Cell {
         match self {
             Column::Id => Cell::Integer(i64::from(t.id)),
             Column::Amount => t
                 .amount
+                .replace(',', "")
                 .parse::<f64>()
                 .map_or_else(|_| Cell::Text(t.amount.clone()), Cell::Decimal),
             Column::Date => Cell::Date(t.date.clone()),
@@ -239,8 +242,16 @@ mod tests {
     #[test]
     fn unparseable_amount_falls_back_to_text() {
         let mut t = tx();
-        t.amount = "1,234.00".into();
-        assert_eq!(Column::Amount.cell(&t), Cell::Text("1,234.00".into()));
+        t.amount = "R 12".into();
+        assert_eq!(Column::Amount.cell(&t), Cell::Text("R 12".into()));
+    }
+
+    #[test]
+    fn thousands_separators_still_give_a_number() {
+        let mut t = tx();
+        t.amount = "-1,234,567.89".into();
+        assert_eq!(Column::Amount.cell(&t), Cell::Decimal(-1_234_567.89));
+        assert_eq!(Column::Amount.value(&t), "-1,234,567.89");
     }
 
     #[test]
