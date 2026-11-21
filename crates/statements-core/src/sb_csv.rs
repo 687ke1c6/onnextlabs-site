@@ -1,9 +1,9 @@
 //! Standard Bank CSV statements, matching the n8n "SB_CSV" path: Determine Statement Type -> Parse SB Csv.
 //! Ids are assigned afterwards, the same way for every format (`statement.rs`).
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
-use crate::statement::{Parsed, Transaction};
+use crate::statement::{Parsed, Transaction, to_iso_date};
 
 /// n8n: `firstRow['0'] === '0'` identifies a Standard Bank CSV.
 pub fn matches(rows: &[csv::StringRecord]) -> bool {
@@ -54,28 +54,6 @@ pub fn parse(rows: &[csv::StringRecord]) -> Result<Parsed> {
         account_number,
         transactions,
     })
-}
-
-/// `YYYYMMDD` -> `YYYY-MM-DD`. JS `new Date(y, m, d)` silently rolls invalid dates over (Feb 31 -> Mar 3);
-/// this rejects them instead.
-fn to_iso_date(yyyymmdd: &str) -> Result<String> {
-    ensure!(
-        yyyymmdd.len() == 8 && yyyymmdd.bytes().all(|b| b.is_ascii_digit()),
-        "expected YYYYMMDD"
-    );
-    let year: u32 = yyyymmdd[0..4].parse()?;
-    let month: u32 = yyyymmdd[4..6].parse()?;
-    let day: u32 = yyyymmdd[6..8].parse()?;
-    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
-    let days_in_month = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => bail!("month out of range"),
-    };
-    ensure!((1..=days_in_month).contains(&day), "day out of range");
-    Ok(format!("{year:04}-{month:02}-{day:02}"))
 }
 
 #[cfg(test)]

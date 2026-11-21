@@ -6,26 +6,29 @@ use std::fmt;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::hash::{DateFormat, row_id};
-use crate::sb_csv;
+use crate::{sb_csv, sb_pdf_csv};
 
 /// A statement format this app can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     /// Standard Bank CSV export.
     SbCsv,
+    /// Standard Bank PDF statement, scraped into a CSV by a separate tool (not the PDF itself).
+    SbPdfCsv,
 }
 
 impl Format {
     /// Every known format, in detection order.
-    pub const ALL: [Format; 1] = [Format::SbCsv];
+    pub const ALL: [Format; 2] = [Format::SbCsv, Format::SbPdfCsv];
 
     /// The name used in the config and messages.
     pub fn id(self) -> &'static str {
         match self {
             Format::SbCsv => "sb_csv",
+            Format::SbPdfCsv => "sb_pdf_csv",
         }
     }
 
@@ -37,6 +40,7 @@ impl Format {
     pub fn description(self) -> &'static str {
         match self {
             Format::SbCsv => "Standard Bank CSV",
+            Format::SbPdfCsv => "Standard Bank PDF, converted to CSV",
         }
     }
 
@@ -44,18 +48,21 @@ impl Format {
     fn recognised_by(self) -> &'static str {
         match self {
             Format::SbCsv => "first cell is \"0\"",
+            Format::SbPdfCsv => "header row starts \"description,amount,date\"",
         }
     }
 
     fn matches(self, rows: &[csv::StringRecord]) -> bool {
         match self {
             Format::SbCsv => sb_csv::matches(rows),
+            Format::SbPdfCsv => sb_pdf_csv::matches(rows),
         }
     }
 
     fn parse(self, rows: &[csv::StringRecord]) -> Result<Parsed> {
         match self {
             Format::SbCsv => sb_csv::parse(rows),
+            Format::SbPdfCsv => sb_pdf_csv::parse(rows),
         }
     }
 }
@@ -159,6 +166,28 @@ fn assign_unique_ids(transactions: &mut [Transaction], date_format: DateFormat) 
         seen.insert(id);
         t.id = id;
     }
+}
+
+/// `YYYYMMDD` -> `YYYY-MM-DD`. JS `new Date(y, m, d)` silently rolls invalid dates over (Feb 31 -> Mar 3);
+/// this rejects them instead.
+pub(crate) fn to_iso_date(yyyymmdd: &str) -> Result<String> {
+    ensure!(
+        yyyymmdd.len() == 8 && yyyymmdd.bytes().all(|b| b.is_ascii_digit()),
+        "expected YYYYMMDD"
+    );
+    let year: u32 = yyyymmdd[0..4].parse()?;
+    let month: u32 = yyyymmdd[4..6].parse()?;
+    let day: u32 = yyyymmdd[6..8].parse()?;
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => bail!("month out of range"),
+    };
+    ensure!((1..=days_in_month).contains(&day), "day out of range");
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
 }
 
 #[cfg(test)]

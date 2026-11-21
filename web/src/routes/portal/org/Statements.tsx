@@ -279,7 +279,7 @@ function UploadPanel(props: {
                   <>
                     <UploadCloud size={28} class="text-muted-foreground" />
                     <span class="text-sm font-medium">Drop a bank statement here, or click to choose</span>
-                    <span class="text-xs text-muted-foreground">CSV only for now (Standard Bank). Nothing is saved until you confirm.</span>
+                    <span class="text-xs text-muted-foreground">CSV only for now: Standard Bank CSV exports, or Standard Bank PDF statements converted to CSV. Nothing is saved until you confirm.</span>
                   </>
                 }
               >

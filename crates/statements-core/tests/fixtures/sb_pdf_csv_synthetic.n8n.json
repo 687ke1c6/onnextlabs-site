@@ -1,0 +1,101 @@
+[
+  {
+    "id": -1139548536,
+    "month": "Dec 2027",
+    "date": "2027-12-30",
+    "description": "IB PAYMENT TO EXAMPLE MUNICIPALITY RATES 01 ST",
+    "amount": "-2,345.67",
+    "currency": "ZAR",
+    "type": null
+  },
+  {
+    "id": -1548088235,
+    "month": "Dec 2027",
+    "date": "2027-12-30",
+    "description": "FEE-ELECTRONIC ACCOUNT PAYMENT ## 123456789",
+    "amount": "-1.25",
+    "currency": "ZAR",
+    "type": "FEES"
+  },
+  {
+    "id": -1520363761,
+    "month": "Dec 2027",
+    "date": "2027-12-31",
+    "description": "MONTHLY MANAGEMENT FEE ##",
+    "amount": "-6.95",
+    "currency": "ZAR",
+    "type": "FEES"
+  },
+  {
+    "id": 782028518,
+    "month": "Jan 2028",
+    "date": "2028-01-01",
+    "description": "REAL TIME TRANSFER FROM EXAMPLE TENANT 000111",
+    "amount": "12,000.00",
+    "currency": "ZAR",
+    "type": null
+  },
+  {
+    "id": 171591086,
+    "month": "Jan 2028",
+    "date": "2028-01-01",
+    "description": "FEE - DEBIT ORDER ##",
+    "amount": "-3.50",
+    "currency": "ZAR",
+    "type": "FEES"
+  },
+  {
+    "id": -1850498531,
+    "month": "Jan 2028",
+    "date": "2028-01-01",
+    "description": "FEE - DEBIT ORDER ##_",
+    "amount": "-3.50",
+    "currency": "ZAR",
+    "type": "FEES"
+  },
+  {
+    "id": -110767218,
+    "month": "Jan 2028",
+    "date": "2028-01-01",
+    "description": "FEE - DEBIT ORDER ##__",
+    "amount": "-3.50",
+    "currency": "ZAR",
+    "type": "FEES"
+  },
+  {
+    "id": -376469174,
+    "month": "Feb 2028",
+    "date": "2028-02-28",
+    "description": "DEBIT TRANSFER CAFÉ, ÉCLAIR & CO 42",
+    "amount": "-87.00",
+    "currency": "ZAR",
+    "type": null
+  },
+  {
+    "id": -1408543953,
+    "month": "Feb 2028",
+    "date": "2028-02-29",
+    "description": "CREDIT TRANSFER EXAMPLE PB MONTHLY UTI ",
+    "amount": "900.00",
+    "currency": "ZAR",
+    "type": null
+  },
+  {
+    "id": -1909163595,
+    "month": "Mar 2028",
+    "date": "2028-03-01",
+    "description": "STD BANK BOND REPAYMENT EXAMPLE HOMEL 987654321 280301",
+    "amount": "-1,234,567.89",
+    "currency": "ZAR",
+    "type": "BOND REPAYMENT"
+  },
+  {
+    "id": 1330169252,
+    "month": "Mar 2028",
+    "date": "2028-03-01",
+    "description": "SYSTEM INTEREST CREDIT",
+    "amount": "0.42",
+    "currency": "ZAR",
+    "type": "INTEREST"
+  }
+]
