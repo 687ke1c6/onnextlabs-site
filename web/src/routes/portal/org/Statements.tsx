@@ -26,6 +26,7 @@ import {
 } from "~/lib/statements";
 import { cn, settled } from "~/lib/utils";
 import { Allowed } from "~/routes/portal/Layout";
+import { Coverage } from "~/routes/portal/org/Coverage";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 import { Fact, TransactionsTable } from "~/routes/portal/org/StatementParts";
 import { type AccountState, StatementsShell } from "~/routes/portal/org/StatementsShell";
@@ -149,6 +150,8 @@ function UploadPanel(props: {
   onSwitch: (id: number) => void;
   /** The account itself changed (e.g. its identifier was set from the preview). */
   onAccountChanged: () => void;
+  /** The account's saved statements, for the coverage timeline. */
+  uploads: () => AccountUploads | undefined;
 }) {
   const org = useOrg();
   const navigate = useNavigate();
@@ -322,6 +325,17 @@ function UploadPanel(props: {
               <Fact label="Period" value={formatPeriod(p().first_date, p().last_date)} />
               <Fact label="Rows" value={`${p().rows} (${shownRows().filter((t) => t.type).length} typed)`} />
             </dl>
+            <Show when={props.uploads()?.account === p().account.id ? props.uploads() : undefined}>
+              {(saved) => (
+                <div class="mt-4 rounded-lg border border-border p-3">
+                  <p class="mb-2 text-xs font-medium">Where it lands in {p().account.name}</p>
+                  <Coverage
+                    uploads={saved().list}
+                    pending={{ label: p().filename, first_date: p().first_date, last_date: p().last_date }}
+                  />
+                </div>
+              )}
+            </Show>
             <AccountCheckBanner preview={p()} onSwitch={props.onSwitch} onSetIdentifier={setIdentifier} />
             <p class="mt-3 text-sm text-muted-foreground">
               {p().new} new {p().new === 1 ? "row" : "rows"}
@@ -459,22 +473,32 @@ const uploadColumns: ColumnDef<UploadSummary, any>[] = [
   },
 ];
 
-function UploadsList(props: { acct: AccountState }) {
+type AccountUploads = { account: number; list: UploadSummary[] };
+
+/** The picked account's saved statements (undefined while loading or for another account). */
+function useAccountUploads(acct: AccountState) {
   const org = useOrg();
   // Each result carries its account, so one account's statements never show under another.
   const [uploads] = createResource(
     () => {
-      const a = props.acct.account();
+      const a = acct.account();
       return a ? { account: a.id } : undefined;
     },
-    async ({ account }) => ({ account, list: await fetchUploads(org.slug, account) }),
+    async ({ account }): Promise<AccountUploads> => ({ account, list: await fetchUploads(org.slug, account) }),
   );
   const current = () => {
     const data = settled(uploads);
-    const a = props.acct.account();
+    const a = acct.account();
     return data && a && data.account === a.id ? data : undefined;
   };
-  const error = () => uploads.error ?? props.acct.accounts.error;
+  return { current, error: () => uploads.error ?? acct.accounts.error };
+}
+
+function UploadsList(props: { uploads: ReturnType<typeof useAccountUploads> }) {
+  const org = useOrg();
+  const navigate = useNavigate();
+  const current = props.uploads.current;
+  const error = props.uploads.error;
 
   return (
     <section class="mt-8 flex min-h-0 flex-1 flex-col">
@@ -486,6 +510,16 @@ function UploadsList(props: { acct: AccountState }) {
         <p class="rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
           No statements saved yet.
         </p>
+      </Show>
+      <Show when={current()?.list.length ? current() : undefined}>
+        {(data) => (
+          <div class="mb-4 rounded-xl border border-border p-4">
+            <Coverage
+              uploads={data().list}
+              onOpen={(u) => void navigate({ to: "/portal/$org/statements/$upload", params: { org: org.slug, upload: String(u.id) } })}
+            />
+          </div>
+        )}
       </Show>
       {/* Keyed: a new account starts with fresh filters and paging. */}
       <Show when={current()?.list.length ? current() : undefined} keyed>
@@ -511,22 +545,26 @@ function Uploads() {
   return (
     // Fills the window's height, so only the grid's rows scroll (see `pageHasGrid`).
     <StatementsShell fill>
-      {(acct, account) => (
-        <>
-          <Show when={can(org, "write-statements")}>
-            <UploadPanel
-              account={account}
-              onSwitch={(id) => acct.pick(id)}
-              onAccountChanged={() => acct.reload()}
-              onSaved={(id) => {
-                acct.pick(id);
-                acct.reload(); // its row and statement counts changed
-              }}
-            />
-          </Show>
-          <UploadsList acct={acct} />
-        </>
-      )}
+      {(acct, account) => {
+        const uploads = useAccountUploads(acct);
+        return (
+          <>
+            <Show when={can(org, "write-statements")}>
+              <UploadPanel
+                account={account}
+                uploads={uploads.current}
+                onSwitch={(id) => acct.pick(id)}
+                onAccountChanged={() => acct.reload()}
+                onSaved={(id) => {
+                  acct.pick(id);
+                  acct.reload(); // its row and statement counts changed
+                }}
+              />
+            </Show>
+            <UploadsList uploads={uploads} />
+          </>
+        );
+      }}
     </StatementsShell>
   );
 }
