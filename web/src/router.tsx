@@ -30,6 +30,11 @@ const SettingsPage = lazyRouteComponent(() => import("~/routes/portal/Settings")
 const OrgLayout = lazyRouteComponent(() => import("~/routes/portal/org/OrgLayout"), "OrgLayout");
 const OrgDashboardPage = lazyRouteComponent(() => import("~/routes/portal/org/Dashboard"), "OrgDashboardPage");
 const DocumentsPage = lazyRouteComponent(() => import("~/routes/portal/org/Documents"), "DocumentsPage");
+const TransactionsPage = lazyRouteComponent(() => import("~/routes/portal/org/Transactions"), "TransactionsPage");
+const UploadsPage = lazyRouteComponent(() => import("~/routes/portal/org/Statements"), "UploadsPage");
+const StatementDetailPage = lazyRouteComponent(() => import("~/routes/portal/org/StatementDetail"), "StatementDetailPage");
+const TypeRulesPage = lazyRouteComponent(() => import("~/routes/portal/org/TypeRules"), "TypeRulesPage");
+const AccountsPage = lazyRouteComponent(() => import("~/routes/portal/org/Accounts"), "AccountsPage");
 
 // /portal                      your organisations (PortalLayout: session, org list, rail)
 // /portal/settings             personal settings
@@ -39,6 +44,11 @@ const DocumentsPage = lazyRouteComponent(() => import("~/routes/portal/org/Docum
 // /portal/roles                roles and their permissions (write-roles)
 // /portal/<org>                an org's dashboard (OrgLayout: resolves the slug)
 // /portal/<org>/documents      its document store (read-docs; uploading needs write-docs)
+// /portal/<org>/statements     every saved transaction (read-statements)
+// /portal/<org>/statements/uploads   saved statement files; uploading needs write-statements
+// /portal/<org>/statements/rules     the account's type rules (editing needs write-statements)
+// /portal/<org>/statements/accounts  accounts (changes need write-statements)
+// /portal/<org>/statements/<id>      one saved statement
 // Static segments win over $org, and the server reserves those names as slugs.
 // What's shown here is cosmetic: the API enforces access.
 const portalRoute = createRoute({ getParentRoute: () => rootRoute, path: "/portal", component: PortalLayout });
@@ -64,6 +74,16 @@ const orgDocumentsRoute = createRoute({
   }),
 });
 
+const orgStatementsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements", component: TransactionsPage });
+const orgUploadsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/uploads", component: UploadsPage });
+const orgTypeRulesRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/rules", component: TypeRulesPage });
+const orgAccountsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/accounts", component: AccountsPage });
+const orgStatementRoute = createRoute({
+  getParentRoute: () => orgRoute,
+  path: "statements/$upload",
+  component: StatementDetailPage,
+});
+
 export const router = createRouter({
   routeTree: rootRoute.addChildren([
     indexRoute,
@@ -75,7 +95,15 @@ export const router = createRouter({
       portalRolesRoute,
       portalUsersRoute,
       portalAccessRoute,
-      orgRoute.addChildren([orgDashboardRoute, orgDocumentsRoute]),
+      orgRoute.addChildren([
+        orgDashboardRoute,
+        orgDocumentsRoute,
+        orgStatementsRoute,
+        orgUploadsRoute,
+        orgTypeRulesRoute,
+        orgAccountsRoute,
+        orgStatementRoute,
+      ]),
     ]),
   ]),
   scrollRestoration: true,

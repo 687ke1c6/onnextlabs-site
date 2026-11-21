@@ -36,6 +36,13 @@ export async function fetchFolder(org: string, folder: string): Promise<FolderLi
   return res.json();
 }
 
+/** Every document in the org (from the database; no storage check), for pickers. */
+export async function fetchAllDocuments(org: string): Promise<DocumentItem[]> {
+  const res = await fetch(`${base(org)}/all`);
+  if (!res.ok) throw new Error(await errorMessage(res, "Couldn't load documents."));
+  return res.json();
+}
+
 /** Every folder path, e.g. ["Brand", "Brand/Logos"]. */
 export async function fetchAllFolders(org: string): Promise<string[]> {
   const res = await fetch(`${base(org)}/folders`);

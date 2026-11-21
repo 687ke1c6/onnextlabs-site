@@ -10,6 +10,7 @@
 //! missing documents (`write-docs`).
 //! Downloads are public unless the document's `public` flag is off.
 
+use crate::db::{self, Db};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -27,7 +28,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
 
 use crate::{
     api::{bad_request, db_error, error, storage_error, Uncompressed},
@@ -74,11 +74,12 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
                 .layer(DefaultBodyLimit::max(body_limit)),
         )
         .route("/api/orgs/{org}/documents/folders", get(all_folders))
+        .route("/api/orgs/{org}/documents/all", get(all_documents))
         .route("/api/documents/{id}/download", get(download))
         .route("/api/documents/{id}", delete(delete_missing))
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct Document {
     id: i64,
     folder: String,
@@ -90,7 +91,7 @@ struct Document {
     uploaded_by: Option<String>,
     public: bool,
     /// The row's file isn't in storage (set when listing a folder).
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     missing: bool,
 }
 
@@ -165,13 +166,13 @@ fn is_clean(name: &str) -> bool {
 /// whose file changed size take the new size (and lose their now-wrong checksum), and
 /// rows without a file are flagged `missing`.
 async fn reconcile(
-    db: &SqlitePool,
+    db: &Db,
     org: &Org,
     folder: &str,
     stored: &[FileInfo],
 ) -> Result<Vec<Document>, Response> {
     let select = || {
-        sqlx::query_as::<_, Document>(select_document!(
+        db::query_as::<Document>(select_document!(
             "WHERE d.org_id = ? AND d.folder = ? ORDER BY d.filename COLLATE NOCASE"
         ))
         .bind(org.id)
@@ -183,7 +184,7 @@ async fn reconcile(
     let found = unrecorded(stored, &documents);
     let resized = resized(stored, &documents);
     for (id, size) in &resized {
-        sqlx::query("UPDATE documents SET size = ?, sha256 = NULL WHERE id = ?")
+        db::query("UPDATE documents SET size = ?, sha256 = NULL WHERE id = ?")
             .bind(i64::try_from(*size).unwrap_or(i64::MAX))
             .bind(id)
             .execute(db)
@@ -193,7 +194,7 @@ async fn reconcile(
     }
     for file in &found {
         // Private: nobody chose to publish it. Ignored if another listing got there first.
-        sqlx::query(
+        db::query(
             "INSERT OR IGNORE INTO documents (org_id, folder, filename, size, public)
                  VALUES (?, ?, ?, ?, 0)",
         )
@@ -236,6 +237,36 @@ fn unrecorded<'a>(stored: &'a [FileInfo], documents: &[Document]) -> Vec<&'a Fil
         .iter()
         .filter(|f| is_clean(&f.name) && !known.contains(f.name.as_str()))
         .collect()
+}
+
+/// Whether a document's file is in storage. Storage errors count as "don't know" (true), so a
+/// storage blip doesn't flag every document as missing.
+pub async fn file_exists(state: &AppState, org: &Org, folder: &str, filename: &str) -> bool {
+    let Ok(path) = folder_path(org, folder).and_then(|d| {
+        d.join(filename)
+            .map_err(|_| bad_request("Invalid file name."))
+    }) else {
+        return false;
+    };
+    state.storage.exists(&path).await.unwrap_or(true)
+}
+
+/// GET /api/orgs/{org}/documents/all — every document in the org, from the database only (no
+/// storage listing), for pickers. `read-docs`.
+async fn all_documents(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+) -> Result<Json<Vec<Document>>, Response> {
+    let org = rbac::authorize(&state.db, &user, &slug, Permission::ReadDocs).await?;
+    let docs = db::query_as(select_document!(
+        "WHERE d.org_id = ? ORDER BY d.folder COLLATE NOCASE, d.filename COLLATE NOCASE"
+    ))
+    .bind(org.id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_error)?;
+    Ok(Json(docs))
 }
 
 /// GET /api/orgs/{org}/documents/folders — every folder path, for the upload destination
@@ -318,6 +349,7 @@ async fn upload(
                     &filename,
                     content_type,
                     &uploaded,
+                    true,
                 )
                 .await;
                 if stored.is_err() {
@@ -333,6 +365,56 @@ async fn upload(
     Err(bad_request("No file was sent."))
 }
 
+/// Saves a file already in memory as a document in `folder` (created if new), numbering the
+/// name if it's taken, exactly like an upload. The caller checks permissions. `public: false`
+/// means only members with `read-docs` can download it. Returns the document's id, folder and
+/// final name.
+#[allow(clippy::too_many_arguments)]
+pub async fn save_bytes(
+    state: &AppState,
+    org: &Org,
+    user_id: i64,
+    folder: &str,
+    filename: &str,
+    content_type: Option<String>,
+    bytes: axum::body::Bytes,
+    public: bool,
+) -> Result<(i64, String, String), Response> {
+    let folder = parse_folder(folder).map_err(bad_request)?;
+    let filename = upload_name(filename).map_err(bad_request)?;
+    let dir = folder_path(org, &folder)?;
+    state.storage.make_dirs(&dir).await.map_err(storage_error)?;
+    let source = futures_util::stream::iter([Ok::<_, std::convert::Infallible>(bytes)]);
+    let uploaded = state
+        .storage
+        .upload(&dir, &filename, source, state.max_upload_bytes)
+        .await
+        .map_err(|e| match e {
+            UploadError::TooLarge => too_large(state.max_upload_bytes),
+            UploadError::Empty => bad_request("The file is empty."),
+            UploadError::Source(never) => match never {},
+            UploadError::Storage(e) => storage_error(e),
+        })?;
+    let stored = store(
+        state,
+        org,
+        user_id,
+        &folder,
+        &dir,
+        &filename,
+        content_type,
+        &uploaded,
+        public,
+    )
+    .await;
+    if stored.is_err() {
+        let _ = state.storage.delete(&uploaded.temp).await;
+    }
+    let doc = stored?;
+    tracing::info!(id = doc.id, org = %org.slug, folder = %doc.folder, filename = %doc.filename, size = doc.size, public, user = user_id, "document saved");
+    Ok((doc.id, doc.folder, doc.filename))
+}
+
 /// Claims a free name in the folder (row first, so concurrent uploads can't collide),
 /// then moves the uploaded file to it. A name taken in storage but not in the database
 /// (a file put there by hand) is skipped too.
@@ -346,15 +428,16 @@ async fn store(
     filename: &str,
     content_type: Option<String>,
     uploaded: &crate::storage::Uploaded,
+    public: bool,
 ) -> Result<Document, Response> {
     for n in 0..100 {
         let name = numbered(filename, n);
         let target = dir
             .join(&name)
             .map_err(|_| bad_request("Invalid file name."))?;
-        let inserted = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO documents (org_id, folder, filename, size, content_type, sha256, uploaded_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        let inserted = db::query_scalar::<i64>(
+            "INSERT INTO documents (org_id, folder, filename, size, content_type, sha256, uploaded_by, public)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(org.id)
         .bind(folder)
@@ -363,15 +446,16 @@ async fn store(
         .bind(&content_type)
         .bind(&uploaded.sha256)
         .bind(user_id)
+        .bind(public)
         .fetch_one(&state.db)
         .await;
         let id = match inserted {
             Ok(id) => id,
-            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => continue,
+            Err(e) if e.is_unique_violation() => continue,
             Err(e) => return Err(db_error(e)),
         };
         let forget_row = || async {
-            let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
+            let _ = db::query("DELETE FROM documents WHERE id = ?")
                 .bind(id)
                 .execute(&state.db)
                 .await;
@@ -394,8 +478,8 @@ async fn store(
     ))
 }
 
-async fn fetch_document(db: &SqlitePool, id: i64) -> Result<Document, Response> {
-    sqlx::query_as(select_document!("WHERE d.id = ?"))
+async fn fetch_document(db: &Db, id: i64) -> Result<Document, Response> {
+    db::query_as(select_document!("WHERE d.id = ?"))
         .bind(id)
         .fetch_one(db)
         .await
@@ -403,7 +487,7 @@ async fn fetch_document(db: &SqlitePool, id: i64) -> Result<Document, Response> 
 }
 
 /// What a download needs: the document and the org whose folder holds it.
-#[derive(sqlx::FromRow)]
+#[derive(Deserialize)]
 struct DownloadRow {
     org_id: i64,
     slug: String,
@@ -422,7 +506,7 @@ async fn download(
     req: Request,
 ) -> Result<Response, Response> {
     let not_found = || error(StatusCode::NOT_FOUND, "Document not found.");
-    let row: Option<DownloadRow> = sqlx::query_as(
+    let row: Option<DownloadRow> = db::query_as(
         "SELECT o.id AS org_id, o.slug, o.name, d.folder, d.filename, d.content_type, d.sha256,
                 d.public
              FROM documents d JOIN organisations o ON o.id = d.org_id WHERE d.id = ?",
@@ -650,7 +734,7 @@ fn multipart_error(e: MultipartError) -> Response {
     error(status, "The upload was malformed or interrupted.")
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Deserialize)]
 struct DeleteRow {
     slug: String,
     folder: String,
@@ -665,7 +749,7 @@ async fn delete_missing(
     UrlPath(id): UrlPath<i64>,
 ) -> Result<StatusCode, Response> {
     let not_found = || error(StatusCode::NOT_FOUND, "Document not found.");
-    let row: DeleteRow = sqlx::query_as(
+    let row: DeleteRow = db::query_as(
         "SELECT o.slug, d.folder, d.filename
              FROM documents d JOIN organisations o ON o.id = d.org_id WHERE d.id = ?",
     )
@@ -686,7 +770,7 @@ async fn delete_missing(
             "This document's file is in storage, so it isn't missing. Reload the folder.",
         ));
     }
-    sqlx::query("DELETE FROM documents WHERE id = ?")
+    db::query("DELETE FROM documents WHERE id = ?")
         .bind(id)
         .execute(&state.db)
         .await

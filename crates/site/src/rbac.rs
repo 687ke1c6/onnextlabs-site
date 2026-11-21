@@ -12,6 +12,7 @@
 //! Guard rule for delegated management: a non-admin can only grant, change or take away a
 //! role whose permissions they hold themselves in that org.
 
+use crate::db::Db;
 use std::sync::Arc;
 
 use axum::{
@@ -23,13 +24,13 @@ use axum::{
 };
 use serde::{ser::SerializeSeq, Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
 
 use crate::{
     api::{bad_request, db_error, error, not_found},
     auth::CurrentUser,
+    db,
     orgs::{self, Org},
-    AppState,
+    params, AppState,
 };
 
 const MAX_ROLE_NAME_CHARS: usize = 50;
@@ -41,13 +42,17 @@ pub enum Permission {
     WriteDocs,
     ManageOrgs,
     WriteRoles,
+    ReadStatements,
+    WriteStatements,
 }
 
 impl Permission {
     /// Every permission, in display order.
-    pub const ALL: [Permission; 4] = [
+    pub const ALL: [Permission; 6] = [
         Permission::ReadDocs,
         Permission::WriteDocs,
+        Permission::ReadStatements,
+        Permission::WriteStatements,
         Permission::ManageOrgs,
         Permission::WriteRoles,
     ];
@@ -59,6 +64,8 @@ impl Permission {
             Permission::WriteDocs => "write-docs",
             Permission::ManageOrgs => "manage-orgs",
             Permission::WriteRoles => "write-roles",
+            Permission::ReadStatements => "read-statements",
+            Permission::WriteStatements => "write-statements",
         }
     }
 
@@ -75,6 +82,12 @@ impl Permission {
             Permission::ManageOrgs => "Add and remove members and change their roles.",
             Permission::WriteRoles => {
                 "Create, edit and delete roles. Roles are shared by every organisation."
+            }
+            Permission::ReadStatements => {
+                "View saved bank statements and their transactions, and add them to your own Google Sheet."
+            }
+            Permission::WriteStatements => {
+                "Upload and delete bank statements, and edit the organisation's type rules."
             }
         }
     }
@@ -151,11 +164,7 @@ pub fn forbidden() -> Response {
 
 /// The org and the user's permissions in it. Orgs they can't see (unknown, or not a
 /// member) are reported as not found, so their existence isn't revealed.
-pub async fn org_access(
-    db: &SqlitePool,
-    user: &CurrentUser,
-    slug: &str,
-) -> Result<(Org, Perms), Response> {
+pub async fn org_access(db: &Db, user: &CurrentUser, slug: &str) -> Result<(Org, Perms), Response> {
     let org = orgs::find(db, slug).await?;
     if user.is_admin() {
         return Ok((org, Perms::all()));
@@ -168,7 +177,7 @@ pub async fn org_access(
 
 /// The org, if the user holds `p` in it (404 if they can't see it, 403 if they lack `p`).
 pub async fn authorize(
-    db: &SqlitePool,
+    db: &Db,
     user: &CurrentUser,
     slug: &str,
     p: Permission,
@@ -179,12 +188,8 @@ pub async fn authorize(
 }
 
 /// The permissions of `user_id`'s role in the org, or None if they aren't a member.
-pub async fn member_perms(
-    db: &SqlitePool,
-    org_id: i64,
-    user_id: i64,
-) -> Result<Option<Perms>, Response> {
-    let row: Option<(Option<String>,)> = sqlx::query_as(
+pub async fn member_perms(db: &Db, org_id: i64, user_id: i64) -> Result<Option<Perms>, Response> {
+    let row: Option<(Option<String>,)> = db::query_as(
         "SELECT (SELECT group_concat(p.permission) FROM role_permissions p WHERE p.role_id = m.role_id)
          FROM org_members m WHERE m.org_id = ? AND m.user_id = ?",
     )
@@ -197,15 +202,11 @@ pub async fn member_perms(
 }
 
 /// Whether the user holds `p` in at least one org (always true for admins).
-pub async fn holds_anywhere(
-    db: &SqlitePool,
-    user: &CurrentUser,
-    p: Permission,
-) -> Result<bool, Response> {
+pub async fn holds_anywhere(db: &Db, user: &CurrentUser, p: Permission) -> Result<bool, Response> {
     if user.is_admin() {
         return Ok(true);
     }
-    sqlx::query_scalar(
+    db::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM org_members m JOIN role_permissions p ON p.role_id = m.role_id
              WHERE m.user_id = ? AND p.permission = ?)",
@@ -218,8 +219,8 @@ pub async fn holds_anywhere(
 }
 
 /// A role's permissions; 400 if the role doesn't exist.
-pub async fn role_perms(db: &SqlitePool, role_id: i64) -> Result<Perms, Response> {
-    let row: Option<(Option<String>,)> = sqlx::query_as(
+pub async fn role_perms(db: &Db, role_id: i64) -> Result<Perms, Response> {
+    let row: Option<(Option<String>,)> = db::query_as(
         "SELECT (SELECT group_concat(permission) FROM role_permissions WHERE role_id = r.id)
          FROM roles r WHERE r.id = ?",
     )
@@ -239,14 +240,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/roles/{id}", put(update_role).delete(delete_role))
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct RoleRow {
     id: i64,
     name: String,
     description: String,
-    #[serde(skip)]
+    #[serde(skip_serializing)]
     permission_csv: Option<String>,
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     permissions: Perms,
     member_count: i64,
 }
@@ -275,7 +276,7 @@ async fn list_roles(
     _user: CurrentUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, Response> {
-    let roles: Vec<RoleRow> = sqlx::query_as(select_role!("ORDER BY r.name COLLATE NOCASE"))
+    let roles: Vec<RoleRow> = db::query_as(select_role!("ORDER BY r.name COLLATE NOCASE"))
         .fetch_all(&state.db)
         .await
         .map_err(db_error)?;
@@ -322,7 +323,7 @@ fn validate_role(input: RoleInput) -> Result<ValidRole, Response> {
     })
 }
 
-async fn require_write_roles(db: &SqlitePool, user: &CurrentUser) -> Result<(), Response> {
+async fn require_write_roles(db: &Db, user: &CurrentUser) -> Result<(), Response> {
     if holds_anywhere(db, user, Permission::WriteRoles).await? {
         Ok(())
     } else {
@@ -330,9 +331,9 @@ async fn require_write_roles(db: &SqlitePool, user: &CurrentUser) -> Result<(), 
     }
 }
 
-fn name_taken(e: sqlx::Error) -> Response {
+fn name_taken(e: db::Error) -> Response {
     match e {
-        sqlx::Error::Database(d) if d.is_unique_violation() => error(
+        d if d.is_unique_violation() => error(
             StatusCode::CONFLICT,
             "A role with that name already exists.",
         ),
@@ -341,46 +342,49 @@ fn name_taken(e: sqlx::Error) -> Response {
 }
 
 /// Replaces the role's permissions and returns the stored role.
-async fn save_role(db: &SqlitePool, id: Option<i64>, role: ValidRole) -> Result<RoleRow, Response> {
-    let mut tx = db.begin().await.map_err(db_error)?;
-    let id: i64 = match id {
+async fn save_role(db: &Db, id: Option<i64>, role: ValidRole) -> Result<RoleRow, Response> {
+    // One batch. A new role's id isn't known until it's inserted, so its permissions find it
+    // by (unique) name; an edit's permissions are only added if the role exists.
+    let mut batch = db::Batch::new();
+    let first = match id {
         None => {
-            sqlx::query_scalar("INSERT INTO roles (name, description) VALUES (?, ?) RETURNING id")
-                .bind(&role.name)
-                .bind(&role.description)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(name_taken)?
+            let i = batch.push(
+                "INSERT INTO roles (name, description) VALUES (?, ?) RETURNING id",
+                params![&role.name, &role.description],
+            );
+            for p in role.perms.iter() {
+                batch.push(
+                    "INSERT INTO role_permissions (role_id, permission)
+                     VALUES ((SELECT id FROM roles WHERE name = ?), ?)",
+                    params![&role.name, p.key()],
+                );
+            }
+            i
         }
         Some(id) => {
-            let res = sqlx::query("UPDATE roles SET name = ?, description = ? WHERE id = ?")
-                .bind(&role.name)
-                .bind(&role.description)
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .map_err(name_taken)?;
-            if res.rows_affected() == 0 {
-                return Err(not_found("Role not found."));
+            let i = batch.push(
+                "UPDATE roles SET name = ?, description = ? WHERE id = ? RETURNING id",
+                params![&role.name, &role.description, id],
+            );
+            batch.push(
+                "DELETE FROM role_permissions WHERE role_id = ?",
+                params![id],
+            );
+            for p in role.perms.iter() {
+                batch.push(
+                    "INSERT INTO role_permissions (role_id, permission)
+                     SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM roles WHERE id = ?1)",
+                    params![id, p.key()],
+                );
             }
-            sqlx::query("DELETE FROM role_permissions WHERE role_id = ?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_error)?;
-            id
+            i
         }
     };
-    for p in role.perms.iter() {
-        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)")
-            .bind(id)
-            .bind(p.key())
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
-    }
-    tx.commit().await.map_err(db_error)?;
-    sqlx::query_as(select_role!("WHERE r.id = ?"))
+    let results = db::run(db, batch).await.map_err(name_taken)?;
+    let Some(id) = results[first].first().and_then(db::Value::as_i64) else {
+        return Err(not_found("Role not found."));
+    };
+    db::query_as(select_role!("WHERE r.id = ?"))
         .bind(id)
         .fetch_one(db)
         .await
@@ -428,7 +432,7 @@ async fn delete_role(
     };
     // Checked up front for a clear message; the ON DELETE RESTRICT foreign key still
     // guards the race (SQLite reports it as a constraint error, code 1811).
-    let holders: i64 = sqlx::query_scalar("SELECT count(*) FROM org_members WHERE role_id = ?")
+    let holders: i64 = db::query_scalar("SELECT count(*) FROM org_members WHERE role_id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -436,7 +440,7 @@ async fn delete_role(
     if holders > 0 {
         return Err(in_use());
     }
-    let res = sqlx::query("DELETE FROM roles WHERE id = ?")
+    let res = db::query("DELETE FROM roles WHERE id = ?")
         .bind(id)
         .execute(&state.db)
         .await;
@@ -446,10 +450,8 @@ async fn delete_role(
             tracing::info!(role = id, user = user.id, "role deleted");
             Ok(StatusCode::NO_CONTENT)
         }
-        Err(sqlx::Error::Database(d))
-            if d.kind() == sqlx::error::ErrorKind::ForeignKeyViolation
-                || d.code().as_deref() == Some("1811") =>
-        {
+        // 1811: SQLITE_CONSTRAINT_TRIGGER.
+        Err(e) if e.is_foreign_key_violation() || e.code.as_deref() == Some("1811") => {
             Err(in_use())
         }
         Err(e) => Err(db_error(e)),
@@ -482,5 +484,62 @@ mod tests {
             serde_json::to_value(editor).unwrap(),
             json!(["read-docs", "write-docs"])
         );
+    }
+
+    fn role(name: &str, perms: &str) -> ValidRole {
+        ValidRole {
+            name: name.into(),
+            description: String::new(),
+            perms: Perms::from_csv(Some(perms)),
+        }
+    }
+
+    #[tokio::test]
+    async fn saving_roles_replaces_permissions_atomically() {
+        let db = db::test_db().await;
+        let created = save_role(&db, None, role("Clerk", "read-docs,write-docs"))
+            .await
+            .unwrap();
+        assert_eq!(
+            created.permissions,
+            Perms::from_csv(Some("read-docs,write-docs"))
+        );
+
+        let edited = save_role(&db, Some(created.id), role("Clerk 2", "read-docs"))
+            .await
+            .unwrap();
+        assert_eq!((edited.id, edited.name.as_str()), (created.id, "Clerk 2"));
+        assert_eq!(edited.permissions, Perms::from_csv(Some("read-docs")));
+
+        let missing = save_role(&db, Some(9999), role("Ghost", "read-docs"))
+            .await
+            .err()
+            .expect("not found");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        // A taken name (ignoring case) is a conflict, and the edit's permissions stay as they were.
+        let other = save_role(&db, None, role("Viewer", "read-docs"))
+            .await
+            .unwrap();
+        let taken = save_role(&db, Some(other.id), role("clerk 2", "write-docs"))
+            .await
+            .err()
+            .expect("conflict");
+        assert_eq!(taken.status(), StatusCode::CONFLICT);
+        let orphans: i64 = db::query_scalar(
+            "SELECT count(*) FROM role_permissions WHERE role_id NOT IN (SELECT id FROM roles)",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(orphans, 0);
+        let viewer: Option<String> = db::query_scalar(
+            "SELECT group_concat(permission) FROM role_permissions WHERE role_id = ?",
+        )
+        .bind(other.id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(viewer.as_deref(), Some("read-docs"));
     }
 }

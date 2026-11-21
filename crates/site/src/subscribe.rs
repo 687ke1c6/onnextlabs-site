@@ -1,3 +1,4 @@
+use crate::db;
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
@@ -82,7 +83,7 @@ pub async fn subscribe(
 
     // Repeat signups succeed silently (no "already subscribed" leak) and re-activate an
     // unsubscribed address; the original ip/user_agent/created_at are kept.
-    let result = sqlx::query(
+    let result = db::query(
         "INSERT INTO subscribers (email, ip, user_agent) VALUES (?, ?, ?)
          ON CONFLICT (email) DO UPDATE SET unsubscribed_at = NULL",
     )

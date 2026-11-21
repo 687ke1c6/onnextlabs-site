@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/solid-router";
 import { createSignal, onMount, Show } from "solid-js";
 import { ParticleField } from "~/components/ParticleField";
 import { Badge } from "~/components/ui/badge";
@@ -131,8 +132,8 @@ function SubscribeForm() {
 
 export function Home() {
   return (
-    <>
-      <header class="relative isolate flex min-h-screen flex-col items-center justify-center overflow-hidden px-4 text-center">
+    <div class="flex min-h-dvh flex-col">
+      <header class="relative isolate flex flex-1 flex-col items-center justify-center overflow-hidden px-4 text-center">
         {/* Background: grid, aurora blobs, particle constellation */}
         <div
           class="absolute inset-0 -z-10 opacity-40 [background-image:linear-gradient(var(--border)_1px,transparent_1px),linear-gradient(90deg,var(--border)_1px,transparent_1px)] [background-size:56px_56px] [mask-image:radial-gradient(ellipse_at_center,black,transparent_70%)]"
@@ -183,7 +184,13 @@ export function Home() {
         </nav>
       </header>
 
-      <footer class="pb-8 text-center text-xs text-muted-foreground">© {new Date().getFullYear()} OnNext Labs</footer>
-    </>
+      <footer class="pb-6 pt-2 text-center text-xs text-muted-foreground">
+        © {new Date().getFullYear()} OnNext Labs
+        <span class="mx-2 opacity-50" aria-hidden="true">·</span>
+        <Link to="/portal" class="opacity-70 transition hover:text-foreground hover:opacity-100">
+          Portal
+        </Link>
+      </footer>
+    </div>
   );
 }

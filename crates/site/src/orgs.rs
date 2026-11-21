@@ -4,17 +4,17 @@
 //! member of, limited by their role there (see `rbac`). Each org's files live in storage
 //! under `orgs/<slug>/` (see `storage`).
 
+use crate::db::{self, Db};
 use std::sync::Arc;
 
 use axum::{
     extract::{Path as UrlPath, State},
     http::StatusCode,
     response::Response,
-    routing::{get, patch},
+    routing::{delete, get, patch},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::{
     api::{bad_request, db_error, error, not_found, storage_error},
@@ -43,7 +43,7 @@ const RESERVED_SLUGS: &[&str] = &[
 const MAX_SLUG_LEN: usize = 63;
 const MAX_NAME_CHARS: usize = 100;
 
-#[derive(Clone, Serialize, sqlx::FromRow)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Org {
     pub id: i64,
     pub slug: String,
@@ -61,6 +61,12 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/orgs", get(my_orgs))
         .route("/api/manage/orgs", get(manageable_orgs).post(create_org))
+        .route("/api/manage/orgs/{org}", delete(delete_org))
+        .route(
+            "/api/manage/orgs/{org}/delete-impact",
+            get(delete_org_preview),
+        )
+        .route("/api/orgs/{org}", patch(rename_org))
         .route(
             "/api/orgs/{org}/members",
             get(list_members).post(add_member),
@@ -73,8 +79,8 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// The org with this slug, or a 404.
-pub async fn find(db: &SqlitePool, slug: &str) -> Result<Org, Response> {
-    sqlx::query_as("SELECT id, slug, name FROM organisations WHERE slug = ?")
+pub async fn find(db: &Db, slug: &str) -> Result<Org, Response> {
+    db::query_as("SELECT id, slug, name FROM organisations WHERE slug = ?")
         .bind(slug)
         .fetch_optional(db)
         .await
@@ -115,7 +121,7 @@ async fn my_orgs(
         Option<String>,
     );
     let rows: Vec<Row> = if user.is_admin() {
-        sqlx::query_as(concat!(
+        db::query_as(concat!(
             "SELECT o.id, o.slug, o.name, r.id, r.name, ",
             role_permissions_csv!(),
             " FROM organisations o
@@ -124,7 +130,7 @@ async fn my_orgs(
              ORDER BY o.name COLLATE NOCASE"
         ))
     } else {
-        sqlx::query_as(concat!(
+        db::query_as(concat!(
             "SELECT o.id, o.slug, o.name, r.id, r.name, ",
             role_permissions_csv!(),
             " FROM organisations o
@@ -158,7 +164,7 @@ async fn my_orgs(
     Ok(Json(orgs))
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct OrgSummary {
     id: i64,
     slug: String,
@@ -173,7 +179,7 @@ async fn manageable_orgs(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<OrgSummary>>, Response> {
-    let orgs = sqlx::query_as(
+    let orgs = db::query_as(
         "SELECT o.id, o.slug, o.name, o.created_at,
                 (SELECT count(*) FROM org_members m WHERE m.org_id = o.id) AS member_count
          FROM organisations o
@@ -205,12 +211,7 @@ async fn create_org(
     State(state): State<Arc<AppState>>,
     Json(body): Json<NewOrg>,
 ) -> Result<(StatusCode, Json<Org>), Response> {
-    let name = body.name.trim();
-    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
-        return Err(bad_request(
-            "Give the organisation a name of up to 100 characters.",
-        ));
-    }
+    let name = validate_name(&body.name).map_err(bad_request)?;
     let slug = match body
         .slug
         .as_deref()
@@ -222,7 +223,7 @@ async fn create_org(
     };
     validate_slug(&slug).map_err(bad_request)?;
 
-    let inserted = sqlx::query_as::<_, Org>(
+    let inserted = db::query_as::<Org>(
         "INSERT INTO organisations (slug, name) VALUES (?, ?) RETURNING id, slug, name",
     )
     .bind(&slug)
@@ -231,7 +232,7 @@ async fn create_org(
     .await;
     let org = match inserted {
         Ok(org) => org,
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+        Err(e) if e.is_unique_violation() => {
             return Err(error(
                 StatusCode::CONFLICT,
                 "That URL name is already taken by another organisation.",
@@ -246,7 +247,7 @@ async fn create_org(
         Err(e) => Err(e),
     };
     if let Err(e) = made {
-        let _ = sqlx::query("DELETE FROM organisations WHERE id = ?")
+        let _ = db::query("DELETE FROM organisations WHERE id = ?")
             .bind(org.id)
             .execute(&state.db)
             .await;
@@ -256,7 +257,7 @@ async fn create_org(
     Ok((StatusCode::CREATED, Json(org)))
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct Member {
     user_id: i64,
     email: Option<String>,
@@ -265,6 +266,99 @@ struct Member {
     role_id: i64,
     role_name: String,
     added_at: String,
+}
+
+#[derive(Deserialize)]
+struct RenameOrg {
+    name: String,
+}
+
+/// PATCH /api/orgs/{org} — change the display name (admins, or `manage-orgs` in that org).
+/// The slug stays: it's the URL and the org's folder in storage.
+async fn rename_org(
+    user: CurrentUser,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+    Json(body): Json<RenameOrg>,
+) -> Result<Json<Org>, Response> {
+    let (org, _) = managed_org(&state, &user, &slug).await?;
+    let name = validate_name(&body.name).map_err(bad_request)?;
+    let renamed: Org =
+        db::query_as("UPDATE organisations SET name = ? WHERE id = ? RETURNING id, slug, name")
+            .bind(name)
+            .bind(org.id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(db_error)?;
+    tracing::info!(org = %org.slug, from = %org.name, to = %renamed.name, user = user.id, "organisation renamed");
+    Ok(Json(renamed))
+}
+
+/// GET /api/manage/orgs/{org}/delete-impact — what deleting the org would remove (admins).
+async fn delete_org_preview(
+    Admin(_): Admin,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+) -> Result<Json<crate::delete_impact::Impact>, Response> {
+    let org = find(&state.db, &slug).await?;
+    let impact = crate::delete_impact::impact(&state.db, &[("organisations", vec![org.id])])
+        .await
+        .map_err(db_error)?;
+    Ok(Json(impact))
+}
+
+#[derive(Deserialize)]
+struct DeleteOrg {
+    /// The org's name, typed by the admin to confirm.
+    confirm: String,
+}
+
+/// DELETE /api/manage/orgs/{org} — deletes the org and, through the foreign keys, everything
+/// in it: memberships, document entries, statements and their rows, types, rules, links.
+/// Accounts stay; files in storage aren't touched. Admins only, confirmed with the name.
+async fn delete_org(
+    Admin(admin): Admin,
+    State(state): State<Arc<AppState>>,
+    UrlPath(slug): UrlPath<String>,
+    Json(body): Json<DeleteOrg>,
+) -> Result<StatusCode, Response> {
+    let org = find(&state.db, &slug).await?;
+    if body.confirm.trim() != org.name {
+        return Err(bad_request(
+            "Type the organisation's name exactly to confirm.",
+        ));
+    }
+    let impact = crate::delete_impact::impact(&state.db, &[("organisations", vec![org.id])])
+        .await
+        .map_err(db_error)?;
+    if impact.blocked {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "Something still depends on this organisation; see the preview.",
+        ));
+    }
+    db::query("DELETE FROM organisations WHERE id = ?")
+        .bind(org.id)
+        .execute(&state.db)
+        .await
+        .map_err(db_error)?;
+    let summary: Vec<String> = impact
+        .effects
+        .iter()
+        .map(|e| format!("{} {:?} {}", e.table, e.action, e.count))
+        .collect();
+    tracing::warn!(org = %org.slug, name = %org.name, user = admin.id, effects = ?summary, "organisation deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A trimmed organisation name: 1–100 characters.
+pub fn validate_name(raw: &str) -> Result<&str, &'static str> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
+        Err("Give the organisation a name of up to 100 characters.")
+    } else {
+        Ok(name)
+    }
 }
 
 /// The org, if the user may manage its members, plus the user's own permissions there
@@ -298,8 +392,8 @@ async fn current_role(state: &AppState, org: &Org, user_id: i64) -> Result<Perms
         .ok_or_else(|| not_found("They aren't a member."))
 }
 
-async fn members_of(db: &SqlitePool, org: &Org) -> Result<Json<Vec<Member>>, Response> {
-    sqlx::query_as(
+async fn members_of(db: &Db, org: &Org) -> Result<Json<Vec<Member>>, Response> {
+    db::query_as(
         "SELECT u.id AS user_id, u.email, u.name, u.picture,
                 m.role_id, r.name AS role_name, m.added_at
          FROM org_members m JOIN users u ON u.id = m.user_id JOIN roles r ON r.id = m.role_id
@@ -337,7 +431,7 @@ async fn add_member(
 ) -> Result<(StatusCode, Json<Vec<Member>>), Response> {
     let (org, mine) = managed_org(&state, &user, &slug).await?;
     within(mine, rbac::role_perms(&state.db, body.role_id).await?)?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = ?)")
+    let exists: bool = db::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = ?)")
         .bind(body.user_id)
         .fetch_one(&state.db)
         .await
@@ -345,15 +439,14 @@ async fn add_member(
     if !exists {
         return Err(not_found("That account doesn't exist."));
     }
-    let res = sqlx::query(
-        "INSERT OR IGNORE INTO org_members (org_id, user_id, role_id) VALUES (?, ?, ?)",
-    )
-    .bind(org.id)
-    .bind(body.user_id)
-    .bind(body.role_id)
-    .execute(&state.db)
-    .await
-    .map_err(db_error)?;
+    let res =
+        db::query("INSERT OR IGNORE INTO org_members (org_id, user_id, role_id) VALUES (?, ?, ?)")
+            .bind(org.id)
+            .bind(body.user_id)
+            .bind(body.role_id)
+            .execute(&state.db)
+            .await
+            .map_err(db_error)?;
     if res.rows_affected() == 0 {
         return Err(error(StatusCode::CONFLICT, "They're already a member."));
     }
@@ -378,7 +471,7 @@ async fn change_role(
     let (org, mine) = managed_org(&state, &user, &slug).await?;
     within(mine, current_role(&state, &org, user_id).await?)?;
     within(mine, rbac::role_perms(&state.db, body.role_id).await?)?;
-    sqlx::query("UPDATE org_members SET role_id = ? WHERE org_id = ? AND user_id = ?")
+    db::query("UPDATE org_members SET role_id = ? WHERE org_id = ? AND user_id = ?")
         .bind(body.role_id)
         .bind(org.id)
         .bind(user_id)
@@ -397,7 +490,7 @@ async fn remove_member(
 ) -> Result<StatusCode, Response> {
     let (org, mine) = managed_org(&state, &user, &slug).await?;
     within(mine, current_role(&state, &org, user_id).await?)?;
-    sqlx::query("DELETE FROM org_members WHERE org_id = ? AND user_id = ?")
+    db::query("DELETE FROM org_members WHERE org_id = ? AND user_id = ?")
         .bind(org.id)
         .bind(user_id)
         .execute(&state.db)
@@ -408,7 +501,7 @@ async fn remove_member(
 }
 
 /// Everyone who has signed in at least once (rows are created on first sign-in).
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 struct UserListItem {
     id: i64,
     email: Option<String>,
@@ -426,7 +519,7 @@ async fn list_users(
     if !rbac::holds_anywhere(&state.db, &user, Permission::ManageOrgs).await? {
         return Err(rbac::forbidden());
     }
-    sqlx::query_as(
+    db::query_as(
         "SELECT id, email, name, picture, last_login_at FROM users
          ORDER BY coalesce(name, email) COLLATE NOCASE",
     )
@@ -507,5 +600,19 @@ mod tests {
             assert!(validate_slug(bad).is_err(), "{bad:?} should be rejected");
         }
         assert!(validate_slug(&"a".repeat(MAX_SLUG_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn names_are_trimmed_and_bounded() {
+        assert_eq!(validate_name("  Acme Ltd ").unwrap(), "Acme Ltd");
+        assert!(validate_name("   ").is_err());
+        assert_eq!(
+            validate_name(&"é".repeat(MAX_NAME_CHARS))
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_NAME_CHARS
+        );
+        assert!(validate_name(&"x".repeat(MAX_NAME_CHARS + 1)).is_err());
     }
 }

@@ -1,13 +1,15 @@
 //! Account administration from the command line (`onnextlabs-site grant-admin ...`): for
 //! bootstrapping and recovery; the portal does the same day to day.
 
-use sqlx::SqlitePool;
+use serde::Deserialize;
+
+use crate::db::{self, Db};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// The single user with this email (they must have signed in at least once).
-async fn user_id_by_email(db: &SqlitePool, email: &str) -> Result<i64> {
-    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM users WHERE email = ?")
+async fn user_id_by_email(db: &Db, email: &str) -> Result<i64> {
+    let ids: Vec<i64> = db::query_scalar("SELECT id FROM users WHERE email = ?")
         .bind(email.trim())
         .fetch_all(db)
         .await?;
@@ -21,9 +23,9 @@ async fn user_id_by_email(db: &SqlitePool, email: &str) -> Result<i64> {
 }
 
 /// Sets or clears the account's admin flag (the portal's Manage → Users does the same).
-pub async fn set_admin(db: &SqlitePool, email: &str, admin: bool) -> Result<()> {
+pub async fn set_admin(db: &Db, email: &str, admin: bool) -> Result<()> {
     let id = user_id_by_email(db, email).await?;
-    sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?")
+    db::query("UPDATE users SET is_admin = ? WHERE id = ?")
         .bind(admin)
         .bind(id)
         .execute(db)
@@ -35,7 +37,7 @@ pub async fn set_admin(db: &SqlitePool, email: &str, admin: bool) -> Result<()> 
     Ok(())
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Deserialize)]
 struct UserRow {
     id: i64,
     email: Option<String>,
@@ -44,9 +46,9 @@ struct UserRow {
     is_admin: bool,
 }
 
-pub async fn list_users(db: &SqlitePool) -> Result<()> {
+pub async fn list_users(db: &Db) -> Result<()> {
     let rows: Vec<UserRow> =
-        sqlx::query_as("SELECT id, email, name, last_login_at, is_admin FROM users ORDER BY id")
+        db::query_as("SELECT id, email, name, last_login_at, is_admin FROM users ORDER BY id")
             .fetch_all(db)
             .await?;
     if rows.is_empty() {
@@ -68,22 +70,19 @@ pub async fn list_users(db: &SqlitePool) -> Result<()> {
 // ---- organisations ----
 
 /// Creates an org. The slug (URL and folder name) is derived from the name unless given.
-pub async fn create_org(db: &SqlitePool, name: &str, slug: Option<&str>) -> Result<()> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("organisation name can't be empty".into());
-    }
+pub async fn create_org(db: &Db, name: &str, slug: Option<&str>) -> Result<()> {
+    let name = crate::orgs::validate_name(name)?;
     let slug = slug
         .map(str::to_owned)
         .unwrap_or_else(|| crate::orgs::slugify(name));
     crate::orgs::validate_slug(&slug)?;
-    sqlx::query("INSERT INTO organisations (slug, name) VALUES (?, ?)")
+    db::query("INSERT INTO organisations (slug, name) VALUES (?, ?)")
         .bind(&slug)
         .bind(name)
         .execute(db)
         .await
         .map_err(|e| match e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => {
+            d if d.is_unique_violation() => {
                 format!("an organisation already uses the slug {slug}").into()
             }
             e => Box::<dyn std::error::Error>::from(e),
@@ -92,8 +91,21 @@ pub async fn create_org(db: &SqlitePool, name: &str, slug: Option<&str>) -> Resu
     Ok(())
 }
 
-async fn org_id_by_slug(db: &SqlitePool, slug: &str) -> Result<i64> {
-    sqlx::query_scalar("SELECT id FROM organisations WHERE slug = ?")
+/// Changes an organisation's display name (its slug stays).
+pub async fn rename_org(db: &Db, slug: &str, name: &str) -> Result<()> {
+    let name = crate::orgs::validate_name(name)?;
+    let id = org_id_by_slug(db, slug).await?;
+    db::query("UPDATE organisations SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id)
+        .execute(db)
+        .await?;
+    println!("renamed /portal/{slug} to {name}");
+    Ok(())
+}
+
+async fn org_id_by_slug(db: &Db, slug: &str) -> Result<i64> {
+    db::query_scalar("SELECT id FROM organisations WHERE slug = ?")
         .bind(slug)
         .fetch_optional(db)
         .await?
@@ -101,15 +113,15 @@ async fn org_id_by_slug(db: &SqlitePool, slug: &str) -> Result<i64> {
 }
 
 /// Adds a user to an org with the named role, or changes their role if already a member.
-pub async fn add_member(db: &SqlitePool, slug: &str, email: &str, role: &str) -> Result<()> {
+pub async fn add_member(db: &Db, slug: &str, email: &str, role: &str) -> Result<()> {
     let org = org_id_by_slug(db, slug).await?;
     let user = user_id_by_email(db, email).await?;
-    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE name = ?")
+    let role_id: i64 = db::query_scalar("SELECT id FROM roles WHERE name = ?")
         .bind(role)
         .fetch_optional(db)
         .await?
         .ok_or_else(|| format!("no role named {role}"))?;
-    sqlx::query(
+    db::query(
         "INSERT INTO org_members (org_id, user_id, role_id) VALUES (?, ?, ?)
          ON CONFLICT (org_id, user_id) DO UPDATE SET role_id = excluded.role_id",
     )
@@ -122,10 +134,10 @@ pub async fn add_member(db: &SqlitePool, slug: &str, email: &str, role: &str) ->
     Ok(())
 }
 
-pub async fn remove_member(db: &SqlitePool, slug: &str, email: &str) -> Result<()> {
+pub async fn remove_member(db: &Db, slug: &str, email: &str) -> Result<()> {
     let org = org_id_by_slug(db, slug).await?;
     let user = user_id_by_email(db, email).await?;
-    let res = sqlx::query("DELETE FROM org_members WHERE org_id = ? AND user_id = ?")
+    let res = db::query("DELETE FROM org_members WHERE org_id = ? AND user_id = ?")
         .bind(org)
         .bind(user)
         .execute(db)
@@ -138,15 +150,15 @@ pub async fn remove_member(db: &SqlitePool, slug: &str, email: &str) -> Result<(
     Ok(())
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Deserialize)]
 struct OrgRow {
     slug: String,
     name: String,
     members: Option<String>,
 }
 
-pub async fn list_orgs(db: &SqlitePool) -> Result<()> {
-    let rows: Vec<OrgRow> = sqlx::query_as(
+pub async fn list_orgs(db: &Db) -> Result<()> {
+    let rows: Vec<OrgRow> = db::query_as(
         "SELECT o.slug, o.name, group_concat(u.email || ' (' || r.name || ')', ', ') AS members
          FROM organisations o
          LEFT JOIN org_members m ON m.org_id = o.id

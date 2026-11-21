@@ -2,6 +2,7 @@ import { createContext, createResource, createSignal, For, type JSX, Match, Show
 import { Link, Outlet, useLocation, useNavigate, useParams } from "@tanstack/solid-router";
 import Building2 from "lucide-solid/icons/building";
 import FileText from "lucide-solid/icons/file-text";
+import Landmark from "lucide-solid/icons/landmark";
 import LayoutDashboard from "lucide-solid/icons/layout-dashboard";
 import Check from "lucide-solid/icons/check";
 import ChevronRight from "lucide-solid/icons/chevron-right";
@@ -23,6 +24,7 @@ import { can, fetchMyOrgs, type Org } from "~/lib/orgs";
 import type { Permission } from "~/lib/roles";
 import { theme } from "~/lib/theme";
 import { cn, settled } from "~/lib/utils";
+import { pageHasGrid, pageIsWide } from "~/lib/view";
 
 type Portal = {
   user: User;
@@ -193,6 +195,19 @@ function Rail(props: { user: User; orgs: Org[]; onSignOut: () => void }) {
                 >
                   <FileText size={18} class="shrink-0" />
                   <span class={label()}>Documents</span>
+                </Link>
+              </Show>
+              <Show when={can(o, "read-statements")}>
+                <Link
+                  to="/portal/$org/statements"
+                  params={{ org: o.slug }}
+                  title={tip("Statements")}
+                  class={item()}
+                  activeProps={ACTIVE}
+                  inactiveProps={INACTIVE}
+                >
+                  <Landmark size={18} class="shrink-0" />
+                  <span class={label()}>Statements</span>
                 </Link>
               </Show>
             </>
@@ -375,7 +390,12 @@ export function PortalLayout() {
       <Match when={allowed()}>
         {(user) => (
           <div
-            class={cn("flex min-h-screen bg-background text-foreground", theme() === "light" && "light")}
+            class={cn(
+              "flex bg-background text-foreground",
+              // Grid pages: a window-high frame; the content area scrolls only if it must.
+              pageHasGrid() ? "h-dvh overflow-hidden" : "min-h-screen",
+              theme() === "light" && "light",
+            )}
             style={{ "color-scheme": theme() }}
           >
             <PortalContext.Provider
@@ -387,8 +407,14 @@ export function PortalLayout() {
               }}
             >
               <Rail user={user()} orgs={settled(orgs) ?? []} onSignOut={signOut} />
-              <main class="min-w-0 flex-1 px-4 py-8 sm:px-8">
-                <div class="mx-auto w-full max-w-5xl">
+              <main class={cn("min-w-0 flex-1 px-4 py-8 sm:px-8", pageHasGrid() && "overflow-y-auto")}>
+                <div
+                  class={cn(
+                    "mx-auto w-full",
+                    pageIsWide() ? "max-w-none" : "max-w-5xl",
+                    pageHasGrid() && "flex h-full flex-col",
+                  )}
+                >
                   <Outlet />
                 </div>
               </main>

@@ -2,15 +2,23 @@
 // `Response` is ~128 bytes, which trips this lint; boxing every error isn't worth it here.
 #![allow(clippy::result_large_err)]
 
+use db_protocol::params;
+
 mod admin;
 mod altcha;
 mod api;
 mod auth;
 mod db;
+mod delete_impact;
 mod documents;
 mod orgs;
 mod rate_limit;
 mod rbac;
+mod statement_accounts;
+mod statement_rows;
+mod statement_types;
+mod statements;
+mod statements_google;
 mod storage;
 mod subscribe;
 mod users;
@@ -24,9 +32,9 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, Subcommand};
+use db::Db;
 use rate_limit::{Limit, RateLimiter};
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
 use tokio::signal;
 use tower_http::{
     compression::{predicate::Predicate, CompressionLayer, DefaultPredicate},
@@ -45,9 +53,24 @@ struct Args {
     #[arg(long, env = "STATIC_DIR", default_value = "web/dist")]
     static_dir: PathBuf,
 
-    /// Directory for the SQLite database. Created if missing. Mount persistent storage here.
+    /// Directory for the SQLite database when there's no `DB_URL`. Created if missing.
+    /// Mount persistent storage here.
     #[arg(long, env = "DATA_DIR", default_value = "data")]
     data_dir: PathBuf,
+
+    /// The database service (crates/db-server), e.g. `http://db.railway.internal:3100`.
+    /// When set, the site uses it instead of a local database file.
+    #[arg(long, env = "DB_URL")]
+    db_url: Option<String>,
+
+    /// The database service's bearer token (with `DB_URL`); must match the service's, if set.
+    #[arg(long, env = "DB_TOKEN", hide_env_values = true)]
+    db_token: Option<String>,
+
+    /// Proxy for `DB_URL`, e.g. `socks5h://127.0.0.1:1080` (`socks5h` resolves names on
+    /// the proxy). Also `socks5://`, `http://`, `https://`.
+    #[arg(long, env = "DB_PROXY")]
+    db_proxy: Option<reqwest::Url>,
 
     /// Largest document upload allowed, in megabytes.
     #[arg(long, env = "MAX_UPLOAD_MB", default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=10_240))]
@@ -65,6 +88,10 @@ struct Args {
     /// Basic auth password for `FILES_URL`.
     #[arg(long, env = "FILES_PASSWORD", hide_env_values = true)]
     files_password: Option<String>,
+
+    /// Proxy for `FILES_URL`, e.g. `socks5h://127.0.0.1:1080`. Same forms as `DB_PROXY`.
+    #[arg(long, env = "FILES_PROXY")]
+    files_proxy: Option<reqwest::Url>,
 
     /// Header carrying the real client IP when behind a trusted reverse proxy
     /// (e.g. x-forwarded-for, x-real-ip). Unset = use the TCP peer address.
@@ -113,6 +140,8 @@ enum Command {
         #[arg(long)]
         slug: Option<String>,
     },
+    /// Rename an organisation (its slug, the URL and folder name, stays the same).
+    RenameOrg { org: String, name: String },
     /// Add a user (by email) to an organisation, or change their role there. They must have
     /// signed in once.
     AddMember {
@@ -129,11 +158,13 @@ enum Command {
 }
 
 pub struct AppState {
-    db: SqlitePool,
+    db: Db,
     auth: auth::Auth,
     altcha: altcha::Altcha,
     /// Where org files live (see `storage`).
     storage: storage::Storage,
+    /// Connecting Google Sheets for statements; None when Google isn't configured.
+    sheets: Option<statements_google::SheetsAuth>,
     max_upload_bytes: u64,
     limiter: RateLimiter,
     client_ip_header: Option<HeaderName>,
@@ -151,7 +182,14 @@ async fn main() {
     let args = Args::parse();
     let static_dir = args.static_dir;
 
-    let db = db::open(&args.data_dir).await.unwrap_or_else(|e| {
+    let db = match &args.db_url {
+        Some(url) => match proxy(args.db_proxy.as_ref(), "DB_PROXY") {
+            Ok(p) => Db::remote(url, args.db_token.as_deref(), p).await,
+            Err(e) => Err(e.into()),
+        },
+        None => Db::open_local(&args.data_dir).await,
+    };
+    let db = db.unwrap_or_else(|e| {
         tracing::error!("database: {e}");
         std::process::exit(1);
     });
@@ -164,6 +202,7 @@ async fn main() {
             Command::CreateOrg { name, slug } => {
                 users::create_org(&db, &name, slug.as_deref()).await
             }
+            Command::RenameOrg { org, name } => users::rename_org(&db, &org, &name).await,
             Command::AddMember { org, email, role } => {
                 users::add_member(&db, &org, &email, &role).await
             }
@@ -189,6 +228,21 @@ async fn main() {
     } else {
         tracing::info!("admin emails: {}", admin_emails.join(", "));
     }
+    let sheets = match (
+        args.public_url.as_deref(),
+        args.google_client_id.as_deref(),
+        args.google_client_secret.as_deref(),
+    ) {
+        (Some(url), Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => {
+            let s = statements_google::SheetsAuth::new(id.to_owned(), secret.to_owned(), url);
+            tracing::info!(
+                "Google Sheets for statements enabled; redirect URI {}",
+                s.redirect_uri()
+            );
+            Some(s)
+        }
+        _ => None,
+    };
     let auth = build_auth(
         args.public_url.as_deref(),
         args.google_client_id,
@@ -211,7 +265,9 @@ async fn main() {
         );
         std::process::exit(1);
     };
-    let storage = match storage::Storage::new(files_url, args.files_user, args.files_password) {
+    let storage = proxy(args.files_proxy.as_ref(), "FILES_PROXY")
+        .and_then(|p| storage::Storage::new(files_url, args.files_user, args.files_password, p));
+    let storage = match storage {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("FILES_URL: {e}");
@@ -234,6 +290,7 @@ async fn main() {
         // ~50k SHA-256 hashes worst case: well under a second in a browser.
         altcha: altcha::Altcha::new(altcha_key, 50_000, Duration::from_secs(600)),
         storage,
+        sheets,
         max_upload_bytes,
         // Per IP: 5 signups / 10 min. Globally: 60 / min across everyone.
         limiter: RateLimiter::new(
@@ -271,6 +328,11 @@ async fn main() {
         .merge(orgs::routes())
         .merge(rbac::routes())
         .merge(documents::routes(max_upload_bytes))
+        .merge(statements::routes(max_upload_bytes))
+        .merge(statements_google::routes())
+        .merge(statement_types::routes())
+        .merge(statement_rows::routes())
+        .merge(statement_accounts::routes())
         // Unknown API paths get a JSON 404 rather than the SPA's index.html.
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(spa)
@@ -357,4 +419,19 @@ async fn shutdown() {
     #[cfg(not(unix))]
     let term = std::future::pending::<()>();
     tokio::select! { _ = ctrl_c => {}, _ = term => {} }
+}
+
+/// The proxy at `url` (from env var `var`) for one backend's client. Every request from that
+/// client goes through it, whatever `HTTP_PROXY` and friends say.
+fn proxy(url: Option<&reqwest::Url>, var: &str) -> Result<Option<reqwest::Proxy>, String> {
+    let Some(url) = url else { return Ok(None) };
+    if !matches!(url.scheme(), "socks5" | "socks5h" | "http" | "https") {
+        return Err(format!(
+            "{var} must be socks5://, socks5h://, http:// or https://, not {}://",
+            url.scheme()
+        ));
+    }
+    reqwest::Proxy::all(url.clone())
+        .map(Some)
+        .map_err(|e| format!("{var}: {e}"))
 }

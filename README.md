@@ -1,6 +1,10 @@
 # OnNext Labs — Coming Soon
 
-Solid + TypeScript + Tailwind v4 + shadcn-style components (`web/`), served by an Axum server (`src/main.rs`).
+Solid + TypeScript + Tailwind v4 + shadcn-style components (`web/`), served by an Axum server (`crates/site`).
+
+The repo is a Cargo workspace: `crates/site` (this server), `crates/statements-core` (statement
+parsing), and the database service, `crates/db-server` with `crates/db-protocol` (see
+[Database service](#database-service)). `cargo run` / `cargo build` mean the site.
 
 ## Develop (devcontainer)
 ```sh
@@ -19,6 +23,7 @@ All settings are env vars (or matching `--flags`; see `cargo run -- --help`). Se
 1. In Google Cloud console, create an OAuth client ID (type: Web application) and add the
    redirect URI `<PUBLIC_URL>/api/auth/callback/google` for each environment
    (e.g. `http://localhost:5173/api/auth/callback/google` and `https://<your-domain>/api/auth/callback/google`).
+   For [Statements](#statements) in Google Sheets, also add `<PUBLIC_URL>/api/statements/google/callback`.
 2. Set `PUBLIC_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 3. Set `ADMIN_EMAILS` to your Google address. `/login` signs you in and lands on `/portal`.
 
@@ -28,18 +33,26 @@ Signing in alone grants nothing. Access comes from:
   admins set it for others at `/portal/users` (Manage → Users), which lists everyone who
   has signed in. Verified `ADMIN_EMAILS` addresses are always admins (use it to bootstrap
   the first one). You can't remove your own admin flag. Org roles never make anyone an admin.
+- **Organisations** are created by admins. Their name can be changed later (Manage →
+  Organisations, by admins or anyone with `manage-orgs` there); their URL name can't, as it's
+  also their folder in file storage. Admins can delete one there too: a preview lists
+  everything that goes with it (worked out from the database's foreign keys), and the name is
+  typed to confirm. Memberships, document entries, statements, types and rules are deleted;
+  accounts stay, and files in storage aren't touched.
 - **Organisation membership**: members land on `/portal`, see their organisations, and open
   each at `/portal/<slug>`. Each membership has one **role**, so someone can be an Admin-org in
   one org and a Member in another.
 - **Roles** are named sets of permissions, shared by every org and edited at
   `/portal/roles`. Two exist to start with: `Admin-org` (every permission, within
   the orgs where you hold it) and `Member` (`read-docs`).
-  Permissions are fixed in code (`src/rbac.rs`):
+  Permissions are fixed in code (`crates/site/src/rbac.rs`):
 
   | Permission    | Allows, in that org                                                 |
   | ------------- | ------------------------------------------------------------------- |
   | `read-docs`   | Browse documents, download private ones                             |
   | `write-docs`  | Upload documents, create folders                                    |
+  | `read-statements`  | View saved bank statements; add them to your own Google Sheet  |
+  | `write-statements` | Upload and delete bank statements; edit the type rules         |
   | `manage-orgs` | Add and remove members, change their roles (`/portal/organisations`) |
   | `write-roles` | Create, edit and delete roles (site-wide, since roles are shared)   |
 
@@ -54,6 +67,7 @@ The same can be done on the command line (people must have signed in once to be 
 ```sh
 onnextlabs-site grant-admin someone@example.com    # recovery; revoke-admin undoes it
 onnextlabs-site create-org "World Health Organisation"   # → /portal/world-health-organisation
+onnextlabs-site rename-org world-health-organisation "WHO"   # the name only; the URL stays
 onnextlabs-site add-member world-health-organisation someone@example.com   # as Member
 onnextlabs-site add-member world-health-organisation someone@example.com --role Admin-org   # or change role
 onnextlabs-site remove-member world-health-organisation someone@example.com
@@ -90,6 +104,7 @@ Hidden files (names starting with `.`) are never listed.
 | `FILES_URL`      | WebDAV root, e.g. `http://127.0.0.1:8090/`. Required               |
 | `FILES_USER`     | Basic auth user                                                    |
 | `FILES_PASSWORD` | Basic auth password                                                |
+| `FILES_PROXY`    | Proxy for `FILES_URL`, e.g. `socks5h://127.0.0.1:1080`             |
 
 In dev, `just files` (also started by `just dev`) serves `./data-dav` on `127.0.0.1:8090`
 as user `dev`, password `dev` (or your `FILES_USER`/`FILES_PASSWORD`), which is what
@@ -121,11 +136,122 @@ files you add to `data-dav/` by hand show up quickly.
 
 [`rclone serve webdav`]: https://rclone.org/commands/rclone_serve_webdav/
 
+### Statements
+Each organisation has a **Statements** section (`/portal/<slug>/statements`, needs
+`read-statements`), built around **accounts**:
+
+- An **account** has a name (required) and an optional identifier, usually the bank account
+  number. Nothing else in Statements is available until the organisation has one; people with
+  `write-statements` create, edit and delete accounts (Statements → Accounts, or "New account…"
+  in the picker). Names and identifiers are unique within the organisation. Deleting an account
+  shows a preview first and deletes its saved statements, rows and type rules; documents stay.
+- The page header names the **account you're working in**; the picker at the top right switches
+  (remembered per browser).
+- **Transactions**: every row saved in the account, in a grid you can search, filter (month and
+  type from their column headers), sort (shift-click for more than one column) and page
+  through, with a status bar (count, sum/average/min/max of Amount, paging, Compact and Wide).
+  `month` ("Aug 2024") is worked out from the date, exactly as the Google Sheet's is. Click a row
+  for its details, type and attached documents.
+- **Uploads**: drop a bank statement CSV (only Standard Bank CSV so far) to save it into the
+  account. When the file states an account number, the preview says whether it **matches** the
+  account's identifier. A mismatch doesn't stop the save, but the button becomes "Save to …
+  anyway", and if another account has that identifier it offers to switch.
+- Each row's id is the n8n hash of its date, description and amount, the same id the Google
+  Sheets use. A row is stored once per account, so saving a statement again (or one that
+  overlaps) updates rows instead of duplicating them.
+- **Types** are a list per organisation, shared by every account: add, rename (renames it on
+  every row and rule) or delete one nobody uses. People with `write-statements` can pick a
+  row's type in the grid or in the upload preview; a picked type is *hand-set* and saving a
+  statement never changes it. Clearing it lets the next save type the row from the rules.
+- **Type rules** belong to an account (Statements → Type rules, for the selected account) and
+  set each row's `type` when a statement is saved into it. They're tried in order and the
+  first match wins; a row no rule matches keeps the type it already had.
+- **Documents on rows**: attach any existing document from Documents to a row (`write-statements`
+  and `read-docs`), or remove the link; the document itself is never changed.
+- The original file is always kept in Documents, in `Statements/<account name>`, saved on the
+  uploader's behalf and **private** (only members with `read-docs` can open it). Saving a file
+  that's already in Documents reuses that document instead of adding a copy.
+- Deleting a saved statement (after a preview of what goes) deletes its rows that no other
+  saved statement contains, with their attached-document links. Its file and attached
+  documents stay in Documents.
+
+From a saved statement, anyone with `read-statements` can **send it to their own Google
+Sheet**. "Connect Google Sheets" asks Google for access to their spreadsheets (separately
+from signing in), then they pick or create a spreadsheet and tab. Every row is sent: rows
+whose id isn't in the tab are added (with a header row on an empty tab), and rows already
+there get their `type` cell updated. Nothing else in an existing row is changed, and a blank
+type never replaces one. The connection is held in server memory for about an hour and
+never stored; a restart forgets it.
+
+Google Sheets uses the sign-in OAuth client (`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`), so
+it's on whenever sign-in is. In Google Cloud console:
+1. Add the redirect URI `<PUBLIC_URL>/api/statements/google/callback` to the client.
+2. Enable the **Google Sheets API** and the **Google Drive API** for the project.
+3. On the OAuth consent screen, add the scopes `.../auth/spreadsheets` and
+   `.../auth/drive.metadata.readonly`. `spreadsheets` is a *sensitive* scope: while the
+   app's publishing status is **Testing**, only its test users (up to 100) can connect, and
+   they see an "unverified app" notice once. Opening it to everyone needs Google's
+   verification. Signing in to the portal is unaffected either way: it only asks for
+   identity.
+
+## Database service
+`crates/db-server` puts the SQLite database behind HTTP, so the data can live on its own host.
+The site uses it when `DB_URL` is set (with `DB_TOKEN` if the service has one); otherwise it opens
+`DATA_DIR/onnextlabs.db` itself, as in dev and the tests. Both ways run the same code
+(`crates/db-protocol`), so they behave the same.
+
+- `GET /health`: no auth.
+- `GET /v1/backup`: a consistent copy of the whole database as one SQLite file, taken while
+  it runs (`VACUUM INTO`). `just db-backup` saves one to `backups/`.
+- `POST /v1/query`: `{"sql": "...", "args": [...]}`, one statement on its own; answers
+  `{"columns": [...], "rows": [[...]], "rows_affected": n, "last_insert_id": n}`.
+- `POST /v1/batch`: `{"statements": [{"sql", "args"}, ...]}`, run in one transaction (all or
+  nothing); answers `{"results": [...]}`, one result per statement.
+- Failures answer `{"error": {"kind", "message", "statement"?}}`. `kind` is
+  `unique_violation` (and the other constraints), `sql`, `bad_request`, `unauthorized` or
+  `internal`.
+- Values: NULL → `null`, INTEGER → `7`, REAL → `2.5`, TEXT → `"..."`, BLOB → `{"base64": "..."}`.
+
+When `DB_TOKEN` is set, `/v1` needs `Authorization: Bearer $DB_TOKEN`; without it `/v1` is
+open. Give the site the same `DB_TOKEN` as the service. There are no transactions spanning
+requests: anything atomic is one batch, and later statements find what earlier ones did by
+subquery. The service runs the migrations in `migrations/` at startup, so a schema change
+must also work with the site version that's already running (add a column, use it later).
+
+```sh
+just db          # on :3100 against ./data, token from DB_TOKEN (default: dev-db-token-0123456789)
+just db-backup   # a consistent copy into backups/ (DB_URL, default http://127.0.0.1:3100)
+```
+To run the site against it, set `DB_URL=http://127.0.0.1:3100` (and `DB_TOKEN`) in `.env`.
+To reach it through a proxy, set `DB_PROXY` on the site, e.g. `socks5h://127.0.0.1:1080`
+(`socks5h` resolves the host name on the proxy; `socks5://`, `http://`, `https://` work too).
+
+| Variable       | Meaning                                                   |
+| -------------- | --------------------------------------------------------- |
+| `DB_TOKEN`     | Bearer token. Optional: unset or empty means no auth      |
+| `DATA_DIR`     | Directory holding `onnextlabs.db`. Default `data`         |
+| `PORT`         | Default `3100`                                            |
+| `MAX_BODY_MIB` | Largest request body (big uploads are one batch). Default `64` |
+
+#### On Railway
+One repo, two services. Add a service from this repo with:
+- variable `RAILWAY_DOCKERFILE_PATH=/crates/db-server/Dockerfile`, `DB_TOKEN`;
+- a volume mounted at `/app/data` (the database moves here from the site's volume);
+- healthcheck path `/health`, no public domain (private network only);
+- on the site: `DB_URL=http://${{<db service>.RAILWAY_PRIVATE_DOMAIN}}:3100` and the same
+  `DB_TOKEN`. The site then needs no volume;
+- watch paths `/crates/db-server/**`, `/crates/db-protocol/**`, `/migrations/**`,
+  `/Cargo.lock`, so site-only changes don't redeploy it. Give the site the opposite
+  (`/web/**`, `/crates/site/**`, `/crates/statements-core/**`, `/crates/db-protocol/**`,
+  `/Dockerfile`, `/Cargo.lock`).
+
 ## Build & run with Docker
 ```sh
 docker build -t onnextlabs-site .
 docker run --rm -p 3000:3000 -v onnextlabs-data:/app/data --env-file .env \
   -e FILES_URL=http://<webdav-host>:8080/ onnextlabs-site
+
+docker build -f crates/db-server/Dockerfile -t onnextlabs-db .   # the database service
 ```
 Mount a volume at `/app/data` (`DATA_DIR`) so the database survives redeploys. Files are on
 the WebDAV server (`FILES_URL`), which must be reachable from the container: `127.0.0.1` in

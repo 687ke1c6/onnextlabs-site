@@ -30,10 +30,14 @@ use openidconnect::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
-use crate::{subscribe::client_ip, AppState};
+use crate::{
+    db::{self, Db},
+    params,
+    subscribe::client_ip,
+    AppState,
+};
 
 const SESSION_COOKIE: &str = "sid";
 const STATE_COOKIE: &str = "oauth_state";
@@ -194,7 +198,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// Only same-site relative paths, so `return_to` can't become an open redirect.
-fn safe_return_to(raw: Option<&str>) -> String {
+pub(crate) fn safe_return_to(raw: Option<&str>) -> String {
     match raw {
         Some(p)
             if p.starts_with('/')
@@ -403,13 +407,14 @@ async fn exchange(
 
 /// Upserts the user (refreshing profile fields) and creates a session; returns the cookie token.
 async fn start_session(
-    db: &SqlitePool,
+    db: &Db,
     id: &Identity,
     ip: &str,
     user_agent: Option<String>,
-) -> sqlx::Result<String> {
-    let mut tx = db.begin().await?;
-    let user_id: i64 = sqlx::query_scalar(
+) -> db::Result<String> {
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+    let mut batch = db::Batch::new();
+    batch.push(
         "INSERT INTO users (issuer, subject, email, email_verified, name, picture)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (issuer, subject) DO UPDATE SET
@@ -417,38 +422,37 @@ async fn start_session(
              email_verified = excluded.email_verified,
              name = excluded.name,
              picture = excluded.picture,
-             last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         RETURNING id",
-    )
-    .bind(&id.issuer)
-    .bind(&id.subject)
-    .bind(&id.email)
-    .bind(id.email_verified)
-    .bind(&id.name)
-    .bind(&id.picture)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-    sqlx::query(
+             last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        params![
+            &id.issuer,
+            &id.subject,
+            id.email.clone(),
+            id.email_verified,
+            id.name.clone(),
+            id.picture.clone()
+        ],
+    );
+    batch.push(
         "INSERT INTO sessions (token_hash, user_id, ip, user_agent, expires_at)
-         VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))",
-    )
-    .bind(hash_token(&token))
-    .bind(user_id)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(format!("+{SESSION_DAYS} days"))
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+         VALUES (?, (SELECT id FROM users WHERE issuer = ? AND subject = ?), ?, ?,
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))",
+        params![
+            hash_token(&token),
+            &id.issuer,
+            &id.subject,
+            ip,
+            user_agent,
+            format!("+{SESSION_DAYS} days")
+        ],
+    );
+    db::run(db, batch).await?;
     Ok(token)
 }
 
 /// POST /api/auth/logout
 async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     if let Some(c) = jar.get(SESSION_COOKIE) {
-        let res = sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+        let res = db::query("DELETE FROM sessions WHERE token_hash = ?")
             .bind(hash_token(c.value()))
             .execute(&state.db)
             .await;
@@ -469,9 +473,9 @@ async fn me(user: CurrentUser) -> Json<CurrentUser> {
 }
 
 /// Deletes expired sessions; called periodically.
-pub async fn sweep_sessions(db: &SqlitePool) {
+pub async fn sweep_sessions(db: &Db) {
     let sql = "DELETE FROM sessions WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
-    if let Err(e) = sqlx::query(sql).execute(db).await {
+    if let Err(e) = db::query(sql).execute(db).await {
         tracing::error!(error = %e, "sweeping sessions failed");
     }
 }
@@ -481,19 +485,19 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
 }
 
 /// The signed-in user. As an extractor, rejects with 401 when there's no valid session.
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize)]
 pub struct CurrentUser {
     pub id: i64,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing)]
     pub email_verified: bool,
     /// Admins can do everything, in every organisation.
     pub admin: bool,
     /// Why they're an admin: "flag" (set by an admin or `grant-admin`), "admin-emails".
     /// Empty if not.
-    #[sqlx(skip)]
+    #[serde(skip_deserializing)]
     pub admin_via: Vec<&'static str>,
 }
 
@@ -511,7 +515,7 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let unauthorized = || json_error(StatusCode::UNAUTHORIZED, "Not signed in.");
-        let internal = |e: sqlx::Error| {
+        let internal = |e: db::Error| {
             tracing::error!(error = %e, "session lookup failed");
             json_error(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.")
         };
@@ -519,7 +523,7 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         let jar = CookieJar::from_headers(&parts.headers);
         let token = jar.get(SESSION_COOKIE).ok_or_else(unauthorized)?;
 
-        let user: Option<CurrentUser> = sqlx::query_as(
+        let user: Option<CurrentUser> = db::query_as(
             "SELECT u.id, u.email, u.name, u.picture, u.email_verified, u.is_admin AS admin
                  FROM sessions s JOIN users u ON u.id = s.user_id
                  WHERE s.token_hash = ? AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
@@ -585,6 +589,40 @@ mod tests {
             Some("/a\nb"),
         ] {
             assert_eq!(safe_return_to(bad), DEFAULT_RETURN_TO, "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sessions_upsert_the_user_and_link_to_them() {
+        let db = db::test_db().await;
+        let mut id = Identity {
+            issuer: "https://issuer".into(),
+            subject: "abc".into(),
+            email: Some("a@example.com".into()),
+            email_verified: true,
+            name: Some("A".into()),
+            picture: None,
+        };
+        let t1 = start_session(&db, &id, "1.2.3.4", None).await.unwrap();
+        id.name = Some("A2".into());
+        let t2 = start_session(&db, &id, "1.2.3.4", Some("ua".into()))
+            .await
+            .unwrap();
+        assert_ne!(t1, t2);
+
+        let users: Vec<(i64, Option<String>)> = db::query_as("SELECT id, name FROM users")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].1.as_deref(), Some("A2"));
+        for t in [&t1, &t2] {
+            let owner: i64 = db::query_scalar("SELECT user_id FROM sessions WHERE token_hash = ?")
+                .bind(hash_token(t))
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(owner, users[0].0);
         }
     }
 }
