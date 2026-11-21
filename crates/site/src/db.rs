@@ -57,14 +57,24 @@ impl Db {
 
     /// The database service at `url` (e.g. `http://db.railway.internal:3100`). The service
     /// runs the migrations; this only checks it answers, and warns if it doesn't.
-    pub async fn remote(url: &str, token: &str) -> Result<Db, Box<dyn std::error::Error>> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()?;
+    /// `token`, if any, must match the service's `DB_TOKEN`. Requests go through `proxy`
+    /// when given.
+    pub async fn remote(
+        url: &str,
+        token: Option<&str>,
+        proxy: Option<reqwest::Proxy>,
+    ) -> Result<Db, Box<dyn std::error::Error>> {
+        let mut http = reqwest::Client::builder().timeout(Duration::from_secs(60));
+        if let Some(p) = proxy {
+            http = http.proxy(p);
+        }
+        let http = http.build()?;
         let remote = Remote {
             http,
             url: url.trim_end_matches('/').to_owned(),
-            auth: format!("Bearer {token}"),
+            auth: token
+                .filter(|t| !t.is_empty())
+                .map(|t| format!("Bearer {t}")),
         };
         match remote
             .http
@@ -117,7 +127,8 @@ pub async fn run(db: &Db, batch: Batch) -> Result<Vec<StmtResult>> {
 struct Remote {
     http: reqwest::Client,
     url: String,
-    auth: String,
+    /// `Authorization` header value; `None` when no `DB_TOKEN` is configured.
+    auth: Option<String>,
 }
 
 impl Remote {
@@ -130,10 +141,11 @@ impl Remote {
             |e: reqwest::Error| Error::new(ErrorKind::Internal, format!("database service: {e}"));
         let body = serde_json::to_vec(body)
             .map_err(|e| Error::new(ErrorKind::BadRequest, e.to_string()))?;
-        let res = self
-            .http
-            .post(format!("{}{path}", self.url))
-            .header(reqwest::header::AUTHORIZATION, &self.auth)
+        let mut req = self.http.post(format!("{}{path}", self.url));
+        if let Some(auth) = &self.auth {
+            req = req.header(reqwest::header::AUTHORIZATION, auth);
+        }
+        let res = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
             .send()

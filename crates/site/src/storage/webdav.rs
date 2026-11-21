@@ -47,6 +47,7 @@ impl Storage {
         mut base: Url,
         user: Option<String>,
         password: Option<String>,
+        proxy: Option<reqwest::Proxy>,
     ) -> Result<Self, String> {
         if !matches!(base.scheme(), "http" | "https") {
             return Err(format!("FILES_URL must be http(s), not {}", base.scheme()));
@@ -60,13 +61,15 @@ impl Storage {
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
-        let client = Client::builder()
+        let mut client = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             // Credentials go on every request; never send them somewhere else.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| e.to_string())?;
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(p) = proxy {
+            client = client.proxy(p);
+        }
+        let client = client.build().map_err(|e| e.to_string())?;
         let auth = match (user, password) {
             (Some(u), p) => Some((u, p.unwrap_or_default())),
             (None, Some(_)) => return Err("FILES_PASSWORD is set without FILES_USER".into()),
@@ -497,7 +500,7 @@ mod tests {
     use super::*;
 
     fn base(s: &str) -> Url {
-        Storage::new(Url::parse(s).unwrap(), None, None)
+        Storage::new(Url::parse(s).unwrap(), None, None, None)
             .unwrap()
             .base
             .clone()
@@ -540,10 +543,10 @@ mod tests {
     #[test]
     fn config_is_checked() {
         let url = |s: &str| Url::parse(s).unwrap();
-        assert!(Storage::new(url("ftp://x/"), None, None).is_err());
-        assert!(Storage::new(url("http://u:p@x/"), None, None).is_err());
-        assert!(Storage::new(url("http://x/"), None, Some("p".into())).is_err());
-        assert!(Storage::new(url("http://x/"), Some("u".into()), Some("p".into())).is_ok());
+        assert!(Storage::new(url("ftp://x/"), None, None, None).is_err());
+        assert!(Storage::new(url("http://u:p@x/"), None, None, None).is_err());
+        assert!(Storage::new(url("http://x/"), None, Some("p".into()), None).is_err());
+        assert!(Storage::new(url("http://x/"), Some("u".into()), Some("p".into()), None).is_ok());
     }
 
     /// As `rclone serve webdav` v1.71.2 answered `PROPFIND_BODY` with `Depth: 1` (served from `/`).
@@ -641,7 +644,8 @@ mod tests {
                 .spawn()
                 .expect("rclone must be installed for these tests (it is in the devcontainer)");
             let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-            let storage = Storage::new(url, Some("test".into()), Some("test".into())).unwrap();
+            let storage =
+                Storage::new(url, Some("test".into()), Some("test".into()), None).unwrap();
             // Built first, so `Drop` stops rclone even if it never answers.
             let dav = Rclone {
                 child,
@@ -795,6 +799,7 @@ mod tests {
             dav.storage.base.clone(),
             Some("test".into()),
             Some("nope".into()),
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -803,7 +808,7 @@ mod tests {
         ));
         let base = dav.storage.base.clone();
         drop(dav);
-        let down = Storage::new(base, Some("test".into()), Some("test".into())).unwrap();
+        let down = Storage::new(base, Some("test".into()), Some("test".into()), None).unwrap();
         assert!(matches!(
             down.check().await,
             Err(StorageError::Unavailable(_))

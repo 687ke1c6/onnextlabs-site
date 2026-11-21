@@ -5,7 +5,8 @@
 //! - `POST /v1/batch`  — statements in one transaction (all or nothing).
 //! - `GET  /v1/backup` — a consistent copy of the whole database, as one SQLite file.
 //!
-//! Every `/v1` request needs `Authorization: Bearer <DB_TOKEN>`. The request and response
+//! When `DB_TOKEN` is set, every `/v1` request needs `Authorization: Bearer <DB_TOKEN>`;
+//! without it `/v1` is open (fine on a private network). The request and response
 //! shapes are in the `db-protocol` crate. Migrations (`/migrations`) run at startup, so a
 //! deploy of this service is what changes the schema.
 
@@ -39,9 +40,9 @@ struct Args {
     /// Directory holding the database file (created if missing). Mount a volume here.
     #[arg(long, env = "DATA_DIR", default_value = "data")]
     data_dir: PathBuf,
-    /// Shared secret clients send as `Authorization: Bearer <token>`.
+    /// Shared secret clients send as `Authorization: Bearer <token>`. Unset or empty: no auth.
     #[arg(long, env = "DB_TOKEN", hide_env_values = true)]
-    token: String,
+    token: Option<String>,
     /// Largest request body accepted, in MiB (big statement uploads are one batch).
     #[arg(long, env = "MAX_BODY_MIB", default_value_t = 64)]
     max_body_mib: usize,
@@ -50,8 +51,8 @@ struct Args {
 struct AppState {
     db: SqlitePool,
     /// SHA-256 of the token: comparing digests keeps the comparison constant-time whatever
-    /// the length of what a client sends.
-    token_hash: [u8; 32],
+    /// the length of what a client sends. `None`: no token configured, `/v1` is open.
+    token_hash: Option<[u8; 32]>,
     /// Where backups are written before they're sent (the data volume, so there's room).
     scratch_dir: PathBuf,
 }
@@ -66,9 +67,9 @@ async fn main() {
         .init();
 
     let args = Args::parse();
-    if args.token.len() < 16 {
-        tracing::error!("DB_TOKEN must be at least 16 characters");
-        std::process::exit(1);
+    let token = args.token.as_deref().filter(|t| !t.is_empty());
+    if token.is_none() {
+        tracing::warn!("DB_TOKEN isn't set: /v1 accepts requests without a token");
     }
 
     let db = open(&args.data_dir).await.unwrap_or_else(|e| {
@@ -77,7 +78,7 @@ async fn main() {
     });
     let app = app(
         db.clone(),
-        &args.token,
+        token,
         args.max_body_mib * 1024 * 1024,
         args.data_dir.clone(),
     );
@@ -116,10 +117,10 @@ async fn open(dir: &std::path::Path) -> Result<SqlitePool, Box<dyn std::error::E
     Ok(pool)
 }
 
-fn app(db: SqlitePool, token: &str, max_body: usize, scratch_dir: PathBuf) -> Router {
+fn app(db: SqlitePool, token: Option<&str>, max_body: usize, scratch_dir: PathBuf) -> Router {
     let state = Arc::new(AppState {
         db,
-        token_hash: Sha256::digest(token.as_bytes()).into(),
+        token_hash: token.map(|t| Sha256::digest(t.as_bytes()).into()),
         scratch_dir,
     });
     let v1 = Router::new()
@@ -175,6 +176,9 @@ fn sql_summary(sql: &str) -> String {
 }
 
 async fn require_token(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let Some(token_hash) = &state.token_hash else {
+        return next.run(req).await;
+    };
     let given = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -182,7 +186,7 @@ async fn require_token(State(state): State<Arc<AppState>>, req: Request, next: N
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     let given_hash: [u8; 32] = Sha256::digest(given.as_bytes()).into();
-    if given.is_empty() || !bool::from(given_hash.ct_eq(&state.token_hash)) {
+    if given.is_empty() || !bool::from(given_hash.ct_eq(token_hash)) {
         return failure(
             ErrorKind::Unauthorized,
             "missing or wrong bearer token".into(),
@@ -360,7 +364,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("../../migrations").run(&db).await.unwrap();
-        app(db, TOKEN, 1024 * 1024, std::env::temp_dir())
+        app(db, Some(TOKEN), 1024 * 1024, std::env::temp_dir())
     }
 
     async fn call(app: &Router, path: &str, token: Option<&str>, body: &str) -> (StatusCode, Json) {
@@ -387,6 +391,20 @@ mod tests {
         let long = sql_summary(&format!("SELECT {}", "x".repeat(200)));
         assert_eq!(long.chars().count(), 121);
         assert!(long.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn v1_is_open_without_a_configured_token() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::from_str("sqlite::memory:").unwrap())
+            .await
+            .unwrap();
+        let app = app(db, None, 1024 * 1024, std::env::temp_dir());
+        for token in [None, Some("anything")] {
+            let (status, _) = call(&app, "/v1/query", token, r#"{"sql": "SELECT 1"}"#).await;
+            assert_eq!(status, StatusCode::OK, "{token:?}");
+        }
     }
 
     #[tokio::test]
@@ -472,7 +490,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("db-server-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let db = open(&dir.join("data")).await.unwrap();
-        let app = app(db, TOKEN, 1024 * 1024, dir.join("data"));
+        let app = app(db, Some(TOKEN), 1024 * 1024, dir.join("data"));
         let (status, _) = call(
             &app,
             "/v1/query",

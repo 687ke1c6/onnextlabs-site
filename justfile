@@ -46,7 +46,8 @@ db:
 # download a consistent backup from the database service into ./backups (DB_URL, DB_TOKEN)
 db-backup:
     mkdir -p backups
-    curl -fsS -H "Authorization: Bearer $DB_TOKEN" "${DB_URL:-http://127.0.0.1:3100}/v1/backup" \
+    curl -fsS ${DB_PROXY:+--proxy "$DB_PROXY"} -H "Authorization: Bearer $DB_TOKEN" \
+        "${DB_URL:-http://127.0.0.1:3100}/v1/backup" \
         -o "backups/onnextlabs-$(date -u +%Y%m%dT%H%M%SZ).db"
     @ls -t backups | head -1
 

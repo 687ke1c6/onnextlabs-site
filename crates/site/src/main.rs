@@ -63,9 +63,14 @@ struct Args {
     #[arg(long, env = "DB_URL")]
     db_url: Option<String>,
 
-    /// The database service's bearer token (with `DB_URL`).
+    /// The database service's bearer token (with `DB_URL`); must match the service's, if set.
     #[arg(long, env = "DB_TOKEN", hide_env_values = true)]
     db_token: Option<String>,
+
+    /// Proxy for `DB_URL`, e.g. `socks5h://127.0.0.1:1080` (`socks5h` resolves names on
+    /// the proxy). Also `socks5://`, `http://`, `https://`.
+    #[arg(long, env = "DB_PROXY")]
+    db_proxy: Option<reqwest::Url>,
 
     /// Largest document upload allowed, in megabytes.
     #[arg(long, env = "MAX_UPLOAD_MB", default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=10_240))]
@@ -83,6 +88,10 @@ struct Args {
     /// Basic auth password for `FILES_URL`.
     #[arg(long, env = "FILES_PASSWORD", hide_env_values = true)]
     files_password: Option<String>,
+
+    /// Proxy for `FILES_URL`, e.g. `socks5h://127.0.0.1:1080`. Same forms as `DB_PROXY`.
+    #[arg(long, env = "FILES_PROXY")]
+    files_proxy: Option<reqwest::Url>,
 
     /// Header carrying the real client IP when behind a trusted reverse proxy
     /// (e.g. x-forwarded-for, x-real-ip). Unset = use the TCP peer address.
@@ -173,10 +182,12 @@ async fn main() {
     let args = Args::parse();
     let static_dir = args.static_dir;
 
-    let db = match (&args.db_url, &args.db_token) {
-        (Some(url), Some(token)) => Db::remote(url, token).await,
-        (Some(_), None) => Err("DB_URL is set but DB_TOKEN isn't".into()),
-        (None, _) => Db::open_local(&args.data_dir).await,
+    let db = match &args.db_url {
+        Some(url) => match proxy(args.db_proxy.as_ref(), "DB_PROXY") {
+            Ok(p) => Db::remote(url, args.db_token.as_deref(), p).await,
+            Err(e) => Err(e.into()),
+        },
+        None => Db::open_local(&args.data_dir).await,
     };
     let db = db.unwrap_or_else(|e| {
         tracing::error!("database: {e}");
@@ -254,7 +265,9 @@ async fn main() {
         );
         std::process::exit(1);
     };
-    let storage = match storage::Storage::new(files_url, args.files_user, args.files_password) {
+    let storage = proxy(args.files_proxy.as_ref(), "FILES_PROXY")
+        .and_then(|p| storage::Storage::new(files_url, args.files_user, args.files_password, p));
+    let storage = match storage {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("FILES_URL: {e}");
@@ -406,4 +419,19 @@ async fn shutdown() {
     #[cfg(not(unix))]
     let term = std::future::pending::<()>();
     tokio::select! { _ = ctrl_c => {}, _ = term => {} }
+}
+
+/// The proxy at `url` (from env var `var`) for one backend's client. Every request from that
+/// client goes through it, whatever `HTTP_PROXY` and friends say.
+fn proxy(url: Option<&reqwest::Url>, var: &str) -> Result<Option<reqwest::Proxy>, String> {
+    let Some(url) = url else { return Ok(None) };
+    if !matches!(url.scheme(), "socks5" | "socks5h" | "http" | "https") {
+        return Err(format!(
+            "{var} must be socks5://, socks5h://, http:// or https://, not {}://",
+            url.scheme()
+        ));
+    }
+    reqwest::Proxy::all(url.clone())
+        .map(Some)
+        .map_err(|e| format!("{var}: {e}"))
 }

@@ -104,6 +104,7 @@ Hidden files (names starting with `.`) are never listed.
 | `FILES_URL`      | WebDAV root, e.g. `http://127.0.0.1:8090/`. Required               |
 | `FILES_USER`     | Basic auth user                                                    |
 | `FILES_PASSWORD` | Basic auth password                                                |
+| `FILES_PROXY`    | Proxy for `FILES_URL`, e.g. `socks5h://127.0.0.1:1080`             |
 
 In dev, `just files` (also started by `just dev`) serves `./data-dav` on `127.0.0.1:8090`
 as user `dev`, password `dev` (or your `FILES_USER`/`FILES_PASSWORD`), which is what
@@ -195,7 +196,7 @@ it's on whenever sign-in is. In Google Cloud console:
 
 ## Database service
 `crates/db-server` puts the SQLite database behind HTTP, so the data can live on its own host.
-The site uses it when `DB_URL` (and `DB_TOKEN`) are set; otherwise it opens
+The site uses it when `DB_URL` is set (with `DB_TOKEN` if the service has one); otherwise it opens
 `DATA_DIR/onnextlabs.db` itself, as in dev and the tests. Both ways run the same code
 (`crates/db-protocol`), so they behave the same.
 
@@ -211,7 +212,8 @@ The site uses it when `DB_URL` (and `DB_TOKEN`) are set; otherwise it opens
   `internal`.
 - Values: NULL → `null`, INTEGER → `7`, REAL → `2.5`, TEXT → `"..."`, BLOB → `{"base64": "..."}`.
 
-`/v1` needs `Authorization: Bearer $DB_TOKEN`. There are no transactions spanning
+When `DB_TOKEN` is set, `/v1` needs `Authorization: Bearer $DB_TOKEN`; without it `/v1` is
+open. Give the site the same `DB_TOKEN` as the service. There are no transactions spanning
 requests: anything atomic is one batch, and later statements find what earlier ones did by
 subquery. The service runs the migrations in `migrations/` at startup, so a schema change
 must also work with the site version that's already running (add a column, use it later).
@@ -221,10 +223,12 @@ just db          # on :3100 against ./data, token from DB_TOKEN (default: dev-db
 just db-backup   # a consistent copy into backups/ (DB_URL, default http://127.0.0.1:3100)
 ```
 To run the site against it, set `DB_URL=http://127.0.0.1:3100` (and `DB_TOKEN`) in `.env`.
+To reach it through a proxy, set `DB_PROXY` on the site, e.g. `socks5h://127.0.0.1:1080`
+(`socks5h` resolves the host name on the proxy; `socks5://`, `http://`, `https://` work too).
 
 | Variable       | Meaning                                                   |
 | -------------- | --------------------------------------------------------- |
-| `DB_TOKEN`     | Bearer token, 16+ characters. Required                    |
+| `DB_TOKEN`     | Bearer token. Optional: unset or empty means no auth      |
 | `DATA_DIR`     | Directory holding `onnextlabs.db`. Default `data`         |
 | `PORT`         | Default `3100`                                            |
 | `MAX_BODY_MIB` | Largest request body (big uploads are one batch). Default `64` |

@@ -23,7 +23,7 @@ axum-extra = { version = "0.12.6", features = ["cookie"] }
 time = "0.3.55"
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "socks"] }
 quick-xml = "0.37"
 percent-encoding = "2.3.2"
 statements-core = { path = "../statements-core" }
