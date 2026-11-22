@@ -1,7 +1,7 @@
 import { json, send } from "~/lib/orgs";
 import type { DeleteImpact } from "~/lib/deleteImpact";
 
-/** A row as parsed (preview) or stored. `txn_id` is the prod n8n id. */
+/** A row as parsed (preview) or stored. `txn_id` is the row id: a hash of its date, amount, description and occurrence. */
 export type Transaction = {
   txn_id: number;
   date: string;
@@ -9,6 +9,25 @@ export type Transaction = {
   description: string;
   currency: string;
   type: string | null;
+  /** YYYY-MM-DD: the date the row counts towards when it isn't `date` (set by hand, e.g. in a Google Sheet). */
+  effective_date: string | null;
+};
+
+/**
+ * A file that states its rows' ids (a Google Sheet export): how those ids compare with the rows.
+ * Rows always get new ids computed from them; this checks the import.
+ */
+export type IdCheck = {
+  /** Already the row's id (a sheet this app wrote). */
+  current: number;
+  /** The old n8n id of the row as written. */
+  n8n_matched: number;
+  /** The old n8n id of the row with the amount written another way (Sheets reformatted it). */
+  n8n_reformatted: number;
+  /** Neither: the row was edited after its id was made (1-based file lines). */
+  mismatched: { line: number; id: number }[];
+  /** Lines with a blank id: rows added to the sheet by hand (imported as they are; deletable). */
+  no_id: number[];
 };
 
 export type PreviewRow = Transaction & {
@@ -50,6 +69,9 @@ export type Preview = {
   new: number;
   existing: number;
   transactions: PreviewRow[];
+  id_check: IdCheck | null;
+  /** Types the file gives that aren't on the list yet; saving adds them. */
+  new_types: string[];
   /** Where the copy of the file is saved in Documents... */
   documents_folder: string;
   /** ...unless this exact file is already there, in which case that document is used. */
@@ -106,7 +128,7 @@ export const previewStatement = async (org: string, file: File, account: number)
 
 /**
  * Parses and saves it into the account; the file itself is kept in Documents. `types`: types
- * picked in the preview, by n8n id (null clears one); they're saved as hand-set.
+ * picked in the preview, by row id (null clears one); they're saved as hand-set.
  */
 export const saveStatement = async (org: string, file: File, account: number, types?: Record<number, string | null>) =>
   json<UploadDetail>(
@@ -215,11 +237,17 @@ export const isNegative = (amount: string) => amount.trim().startsWith("-");
 
 /** A stored row in the org, with the most recent upload that contained it. */
 export type OrgTransaction = Transaction & {
-  /** The row's own id (for editing); `txn_id` is the n8n id. */
+  /** The row's own id (for editing); `txn_id` is the row id from the statement. */
   id: number;
   account_id: number;
   /** The type was picked by hand: saving a statement won't change it. */
   type_manual: boolean;
+  /** A split row (added by hand): the original row's `txn_id`. */
+  split_of: number | null;
+  /** A statement row: how many rows its split has (0 = not split). */
+  split_rows: number;
+  /** Not from a bank statement (a split row, or a Google Sheet row without an id): can be deleted. */
+  hand_added: boolean;
   /** Documents attached to the row. */
   attachments: number;
   /** e.g. "Aug 2024": derived from `date`, as in the sheet's `month` column. */
@@ -266,7 +294,34 @@ export const setRowType = async (org: string, row: number, type: string | null) 
 
 // ---- one row ----
 
+/** A row of a split, or the original row a split belongs to. */
+export type SplitRow = {
+  /** The row's own id (for opening it). */
+  id: number;
+  txn_id: number;
+  date: string;
+  effective_date: string | null;
+  description: string;
+  amount: string;
+  currency: string;
+  type: string | null;
+};
+
+/** A split row as sent when saving a split: `id` for an existing one (kept, with its documents). */
+export type SplitRowInput = {
+  id?: number;
+  date: string;
+  effective_date: string | null;
+  description: string;
+  amount: string;
+  type: string | null;
+};
+
 export type RowDetail = OrgTransaction & {
+  /** A split row: the row it splits, if that's still stored. */
+  split_parent: SplitRow | null;
+  /** A statement row: the rows of its split. */
+  splits: SplitRow[];
   account_name: string;
   account_identifier: string | null;
   /** Saved statements containing the row, with their files in Documents. */
@@ -288,6 +343,30 @@ export type RowDetail = OrgTransaction & {
 const row = (org: string, id: number) => `${base(org)}/statement-transactions/${id}`;
 
 export const fetchRow = async (org: string, id: number) => json<RowDetail>(await fetch(row(org, id)), "Couldn't load the row.");
+
+/**
+ * Sets the split of row `id`: its rows become exactly `rows` (which must add up to zero); an
+ * empty list removes the split. Returns the row.
+ */
+export const saveSplit = async (org: string, id: number, rows: SplitRowInput[]) =>
+  json<RowDetail>(await send("PUT", `${row(org, id)}/split`, { rows }), "Couldn't save the split.");
+
+/** Deletes a row added by hand (not a split row), with its split's rows if it has a split. */
+export const deleteRow = async (org: string, id: number) => json<void>(await send("DELETE", row(org, id)), "Couldn't delete the row.");
+
+/** Sets (YYYY-MM-DD) or clears (null) any row's effective date. Returns the row. */
+export const setEffectiveDate = async (org: string, id: number, effective_date: string | null) =>
+  json<RowDetail>(await send("PATCH", `${row(org, id)}/effective-date`, { effective_date }), "Couldn't change the effective date.");
+
+/** An amount typed by hand, in cents; null if it isn't one (at most two decimals). */
+export function amountCents(amount: string): number | null {
+  const plain = amount.replace(/,/g, "").trim();
+  if (!/^[+-]?(\d+\.?\d{0,2}|\.\d{1,2})$/.test(plain)) return null;
+  return Math.round(Number(plain) * 100);
+}
+
+/** Cents as an amount with two decimals: -472616 -> "-4726.16". */
+export const formatCents = (cents: number) => `${cents < 0 ? "-" : ""}${(Math.abs(cents) / 100).toFixed(2)}`;
 
 /** Links an existing document to the row. */
 export const attachDocument = async (org: string, id: number, documentId: number) =>

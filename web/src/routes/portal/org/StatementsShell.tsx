@@ -272,7 +272,7 @@ export function StatementsShell(props: {
 
   return (
     <div class={props.fill ? "flex min-h-0 flex-1 flex-col" : undefined}>
-      <header class="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-6">
+      <header class="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-4">
         <div class="min-w-0">
           <p class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Statements</p>
           <Show when={state.account()} fallback={<h1 class="truncate text-2xl font-semibold tracking-tight">Accounts</h1>}>

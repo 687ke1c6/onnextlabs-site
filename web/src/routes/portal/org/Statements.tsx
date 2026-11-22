@@ -18,6 +18,7 @@ import {
   formatPeriod,
   fetchTypes,
   type Account,
+  type IdCheck,
   type Preview,
   previewStatement,
   saveStatement,
@@ -144,6 +145,56 @@ function AccountCheckBanner(props: {
   );
 }
 
+/**
+ * A Google Sheet export states its rows' ids. Rows get new ids computed from them either way; the
+ * stated ones are checked to show the import read the sheet as it was written.
+ */
+function IdCheckBanner(props: { check: IdCheck; newTypes: string[] }) {
+  const c = () => props.check;
+  const matched = () => c().current + c().n8n_matched + c().n8n_reformatted;
+  const total = () => matched() + c().mismatched.length;
+  const lines = (ls: number[]) => (ls.length > 12 ? `${ls.slice(0, 12).join(", ")} and ${ls.length - 12} more` : ls.join(", "));
+  return (
+    <div
+      class={cn(
+        "mt-4 flex items-start gap-2 rounded-lg p-3 text-sm",
+        c().mismatched.length ? "border border-amber-500/40 bg-amber-500/10" : "bg-secondary/30 text-muted-foreground",
+      )}
+    >
+      <Show when={c().mismatched.length} fallback={<CircleCheck size={16} class="mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />}>
+        <TriangleAlert size={16} class="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      </Show>
+      <div class="flex-1 space-y-1">
+        <p>
+          {matched()} of {total()} ids in the sheet match their rows
+          <Show when={c().n8n_matched + c().n8n_reformatted > 0}>
+            {" "}
+            ({c().n8n_matched + c().n8n_reformatted} old n8n ids
+            <Show when={c().n8n_reformatted > 0}>, {c().n8n_reformatted} of them once the amount is written as it was hashed</Show>)
+          </Show>
+          . Every row gets a new id computed from it.
+        </p>
+        <Show when={c().mismatched.length}>
+          <p>
+            {c().mismatched.length} {c().mismatched.length === 1 ? "row was" : "rows were"} edited after its id was made (lines{" "}
+            {lines(c().mismatched.map((m) => m.line))}); saved as the sheet has them now.
+          </p>
+        </Show>
+        <Show when={c().no_id.length}>
+          <p>
+            {c().no_id.length} {c().no_id.length === 1 ? "row was" : "rows were"} added to the sheet by hand (no id; lines {lines(c().no_id)}). They're
+            imported as they are, and can be deleted later.
+          </p>
+        </Show>
+        <p class="text-muted-foreground">
+          Types from the sheet are saved as set by hand
+          <Show when={props.newTypes.length}>, and {props.newTypes.join(", ")} will be added to the types list</Show>.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function UploadPanel(props: {
   account: () => Account;
   onSaved: (accountId: number) => void;
@@ -159,7 +210,7 @@ function UploadPanel(props: {
 
   const [file, setFile] = createSignal<File | null>(null);
   const [preview, setPreview] = createSignal<Preview | null>(null);
-  // Types picked in the preview, by n8n id (null = cleared). Saved as hand-set.
+  // Types picked in the preview, by row id (null = cleared). Saved as hand-set.
   const [picks, setPicks] = createSignal<Record<number, string | null>>({});
   const [types] = createResource(() => org.slug, fetchTypes);
   const typeNames = () => (settled(types) ?? []).map((t) => t.name);
@@ -279,7 +330,7 @@ function UploadPanel(props: {
                   <>
                     <UploadCloud size={28} class="text-muted-foreground" />
                     <span class="text-sm font-medium">Drop a bank statement here, or click to choose</span>
-                    <span class="text-xs text-muted-foreground">CSV only for now: Standard Bank CSV exports, or Standard Bank PDF statements converted to CSV. Nothing is saved until you confirm.</span>
+                    <span class="text-xs text-muted-foreground">CSV only for now: Standard Bank CSV exports, Standard Bank PDF statements converted to CSV, or a Google Sheet of statement rows downloaded as CSV. Nothing is saved until you confirm.</span>
                   </>
                 }
               >
@@ -337,6 +388,7 @@ function UploadPanel(props: {
               )}
             </Show>
             <AccountCheckBanner preview={p()} onSwitch={props.onSwitch} onSetIdentifier={setIdentifier} />
+            <Show when={p().id_check}>{(check) => <IdCheckBanner check={check()} newTypes={p().new_types} />}</Show>
             <p class="mt-3 text-sm text-muted-foreground">
               {p().new} new {p().new === 1 ? "row" : "rows"}
               <Show when={p().existing > 0}>

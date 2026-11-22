@@ -10,7 +10,7 @@
 //! The Sheets client (`statements-core`) is blocking, so calls run on `spawn_blocking`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -31,10 +31,10 @@ use statements_core::{
 };
 
 use crate::{
-    api::{bad_request, error},
+    api::{bad_request, db_error, error},
     auth::{safe_return_to, CurrentUser},
     rbac::{self, Permission},
-    statements::upload_detail,
+    statements::{split_rows_of, upload_detail, StoredTransaction},
     AppState,
 };
 
@@ -512,22 +512,45 @@ async fn send_to_sheet(
     let detail = upload_detail(&state.db, org.id, id).await?;
     let format = Format::from_id(&detail.upload.format)
         .ok_or_else(|| bad_request("This statement's format is no longer supported."))?;
+    // Each row followed by its split's rows (added by hand, so in no upload), so the sheet has
+    // them too.
+    let parents: Vec<i64> = detail.transactions.iter().map(|t| t.txn_id).collect();
+    let splits = split_rows_of(&state.db, detail.upload.account_id, &parents)
+        .await
+        .map_err(db_error)?;
+    let mut splits_by_parent: HashMap<i64, Vec<&StoredTransaction>> = HashMap::new();
+    for s in &splits {
+        if let Some(parent) = s.split_of {
+            splits_by_parent.entry(parent).or_default().push(s);
+        }
+    }
+    let mut sent = HashSet::new();
+    let rows = detail.transactions.iter().flat_map(|t| {
+        // A row a statement repeats is sent with its splits only once.
+        let own = if sent.insert(t.txn_id) {
+            splits_by_parent.remove(&t.txn_id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        std::iter::once(t).chain(own)
+    });
     let statement = Statement {
         format,
         account_number: Some(detail.upload.account_number.clone()).filter(|a| !a.is_empty()),
-        transactions: detail
-            .transactions
-            .iter()
+        transactions: rows
             .map(|t| Transaction {
-                // Stored from an i32, so it always fits.
-                id: i32::try_from(t.txn_id).unwrap_or_default(),
+                id: t.txn_id,
+                occurrence: t.occurrence,
                 date: t.date.clone(),
                 description: t.description.clone(),
                 amount: t.amount.clone(),
                 currency: t.currency.clone(),
                 category: t.category.clone(),
+                effective_date: t.effective_date.clone(),
+                hand_added: false,
             })
             .collect(),
+        id_check: None,
     };
 
     let (target, summary) = with_google(&state, &user, move |g| {

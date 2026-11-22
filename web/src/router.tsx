@@ -35,6 +35,7 @@ const UploadsPage = lazyRouteComponent(() => import("~/routes/portal/org/Stateme
 const StatementDetailPage = lazyRouteComponent(() => import("~/routes/portal/org/StatementDetail"), "StatementDetailPage");
 const TypeRulesPage = lazyRouteComponent(() => import("~/routes/portal/org/TypeRules"), "TypeRulesPage");
 const AccountsPage = lazyRouteComponent(() => import("~/routes/portal/org/Accounts"), "AccountsPage");
+const QuickFiltersPage = lazyRouteComponent(() => import("~/routes/portal/org/QuickFilters"), "QuickFiltersPage");
 
 // /portal                      your organisations (PortalLayout: session, org list, rail)
 // /portal/settings             personal settings
@@ -48,6 +49,7 @@ const AccountsPage = lazyRouteComponent(() => import("~/routes/portal/org/Accoun
 // /portal/<org>/statements/uploads   saved statement files; uploading needs write-statements
 // /portal/<org>/statements/rules     the account's type rules (editing needs write-statements)
 // /portal/<org>/statements/accounts  accounts (changes need write-statements)
+// /portal/<org>/statements/filters   quick filters for the grid (editing needs write-statements)
 // /portal/<org>/statements/<id>      one saved statement
 // Static segments win over $org, and the server reserves those names as slugs.
 // What's shown here is cosmetic: the API enforces access.
@@ -78,6 +80,7 @@ const orgStatementsRoute = createRoute({ getParentRoute: () => orgRoute, path: "
 const orgUploadsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/uploads", component: UploadsPage });
 const orgTypeRulesRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/rules", component: TypeRulesPage });
 const orgAccountsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/accounts", component: AccountsPage });
+const orgQuickFiltersRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/filters", component: QuickFiltersPage });
 const orgStatementRoute = createRoute({
   getParentRoute: () => orgRoute,
   path: "statements/$upload",
@@ -102,6 +105,7 @@ export const router = createRouter({
         orgUploadsRoute,
         orgTypeRulesRoute,
         orgAccountsRoute,
+        orgQuickFiltersRoute,
         orgStatementRoute,
       ]),
     ]),

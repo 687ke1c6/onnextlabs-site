@@ -37,8 +37,7 @@ import {
   gridUnmounted,
   DENSITIES,
   type Density,
-  gridDensity,
-  setGridDensity,
+  rememberedDensity,
   setWideGrids,
   wideGridMounted,
   wideGridUnmounted,
@@ -111,7 +110,7 @@ export function DataGrid<T>(props: {
    */
   status?: (rows: T[], filtering: boolean) => JSX.Element;
   /**
-   * Show the status bar: counts, paging and the Compact / Wide view switches. Without it every
+   * Show the status bar: counts, paging and the density / Wide view switches (density is per grid). Without it every
    * row is shown (no paging) and the grid doesn't widen the page.
    */
   statusBar?: boolean;
@@ -123,6 +122,8 @@ export function DataGrid<T>(props: {
   isSelected?: (row: T) => boolean;
   /** Extra classes for a row that isn't selected (background and hover), e.g. to mark rows with something attached. */
   rowClass?: (row: T) => string | undefined;
+  /** Extra controls at the end of the toolbar, after Columns (e.g. a page's own filter menu). */
+  toolbarEnd?: JSX.Element;
 }) {
   const [sorting, setSorting] = createSignal<SortingState>(props.initialSorting ?? []);
   const [filters, setFilters] = createSignal<ColumnFiltersState>([]);
@@ -140,9 +141,23 @@ export function DataGrid<T>(props: {
     onMount(wideGridMounted);
     onCleanup(wideGridUnmounted);
   }
+  // Each grid has its own density, set from its status bar; grids without one stay normal.
+  const [density, setDensity] = props.statusBar
+    ? rememberedDensity(props.storageKey)
+    : ([() => "normal" as Density, (_: Density) => {}] as const);
+  // Sorting by clicking headers is a status-bar setting, off until turned on (then a header click
+  // sorts; off, clicking a filterable header opens its filter). Grids without a status bar sort.
+  const [sortable, setSortableFlag] = props.statusBar
+    ? rememberedFlag(`${props.storageKey}:sortable`, false)
+    : ([() => true, (_: boolean) => {}] as const);
+  const setSortable = (on: boolean) => {
+    setSortableFlag(on);
+    // Off: back to the grid's own order.
+    if (!on) setSorting(props.initialSorting ?? []);
+  };
   // Compact and condensed both keep each row to one line; condensed also shrinks it.
-  const compact = () => gridDensity() !== "normal";
-  const condensed = () => gridDensity() === "condensed";
+  const compact = () => density() !== "normal";
+  const condensed = () => density() === "condensed";
 
   const table = createSolidTable<T>({
     get data() {
@@ -300,6 +315,7 @@ export function DataGrid<T>(props: {
               )}
             </For>
           </Menu>
+          {props.toolbarEnd}
         </div>
       </div>
 
@@ -326,33 +342,55 @@ export function DataGrid<T>(props: {
                       return (
                         <th
                           class={cn(condensed() ? "px-3 py-1" : "px-4 py-2", "font-medium", m.width, m.align === "right" && "text-right")}
-                          aria-sort={sorted() === "asc" ? "ascending" : sorted() === "desc" ? "descending" : "none"}
+                          aria-sort={sortable() ? (sorted() === "asc" ? "ascending" : sorted() === "desc" ? "descending" : "none") : undefined}
                         >
-                          <div class={cn("inline-flex items-center gap-1", m.align === "right" && "flex-row-reverse")}>
-                            <button
-                              type="button"
-                              onClick={h.column.getToggleSortingHandler()}
-                              title="Sort (shift-click to sort by more than one column)"
-                              class={cn(
-                                "inline-flex items-center gap-1 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                sorted() && "text-foreground",
-                              )}
-                            >
-                              {flexRender(h.column.columnDef.header, h.getContext()) as JSX.Element}
-                              <SortIcon dir={sorted()} index={h.column.getSortIndex()} multi={sorting().length > 1} />
-                            </button>
-                            <Show when={m.pick}>
-                              {(pick) => (
-                                <HeaderFilter
-                                  name={m.label ?? String(h.column.columnDef.header)}
-                                  options={pick().options(props.rows)}
-                                  emptyLabel={pick().emptyLabel}
-                                  value={api.filterValue<string[]>(h.column.id, [])}
-                                  onChange={(v) => api.setFilter(h.column.id, v.length ? v : undefined)}
-                                />
-                              )}
-                            </Show>
-                          </div>
+                          <Show
+                            when={sortable()}
+                            fallback={
+                              // Not sorting: the header is its filter (when it has one), or just its name.
+                              <Show
+                                when={m.pick}
+                                fallback={<span>{flexRender(h.column.columnDef.header, h.getContext()) as JSX.Element}</span>}
+                              >
+                                {(pick) => (
+                                  <HeaderFilter
+                                    name={m.label ?? String(h.column.columnDef.header)}
+                                    options={pick().options(props.rows)}
+                                    emptyLabel={pick().emptyLabel}
+                                    value={api.filterValue<string[]>(h.column.id, [])}
+                                    onChange={(v) => api.setFilter(h.column.id, v.length ? v : undefined)}
+                                    label={flexRender(h.column.columnDef.header, h.getContext()) as JSX.Element}
+                                  />
+                                )}
+                              </Show>
+                            }
+                          >
+                            <div class={cn("inline-flex items-center gap-1", m.align === "right" && "flex-row-reverse")}>
+                              <button
+                                type="button"
+                                onClick={h.column.getToggleSortingHandler()}
+                                title="Sort (shift-click to sort by more than one column)"
+                                class={cn(
+                                  "inline-flex items-center gap-1 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                  sorted() && "text-foreground",
+                                )}
+                              >
+                                {flexRender(h.column.columnDef.header, h.getContext()) as JSX.Element}
+                                <SortIcon dir={sorted()} index={h.column.getSortIndex()} multi={sorting().length > 1} />
+                              </button>
+                              <Show when={m.pick}>
+                                {(pick) => (
+                                  <HeaderFilter
+                                    name={m.label ?? String(h.column.columnDef.header)}
+                                    options={pick().options(props.rows)}
+                                    emptyLabel={pick().emptyLabel}
+                                    value={api.filterValue<string[]>(h.column.id, [])}
+                                    onChange={(v) => api.setFilter(h.column.id, v.length ? v : undefined)}
+                                  />
+                                )}
+                              </Show>
+                            </div>
+                          </Show>
                         </th>
                       );
                     }}
@@ -445,7 +483,14 @@ export function DataGrid<T>(props: {
             </Button>
           </div>
           <div class="flex items-center gap-1 sm:border-l sm:border-border sm:pl-2">
-            <DensityButton />
+            <ToggleButton
+              label="Sort"
+              hint={sortable() ? "Clicking a column header sorts by it. Turn off to filter by clicking headers instead." : "Turn on to sort by clicking column headers"}
+              icon={ArrowUpDown}
+              on={sortable()}
+              onChange={setSortable}
+            />
+            <DensityButton density={density()} onChange={setDensity} />
             <ToggleButton label="Wide" hint="Use the full width of the window" icon={MoveHorizontal} on={wideGrids()} onChange={setWideGrids} />
           </div>
         </div>
@@ -460,19 +505,19 @@ const DENSITY: Record<Density, { label: string; icon: typeof Rows3; hint: string
   condensed: { label: "Condensed", icon: Rows4, hint: "One line per row, smaller text" },
 };
 
-/** Row density for every grid: each click moves to the next of normal, compact, condensed. */
-function DensityButton() {
-  const d = () => DENSITY[gridDensity()];
-  const next = () => DENSITIES[(DENSITIES.indexOf(gridDensity()) + 1) % DENSITIES.length];
+/** This grid's row density: each click moves to the next of normal, compact, condensed. */
+function DensityButton(props: { density: Density; onChange: (d: Density) => void }) {
+  const d = () => DENSITY[props.density];
+  const next = () => DENSITIES[(DENSITIES.indexOf(props.density) + 1) % DENSITIES.length];
   return (
     <button
       type="button"
       title={`${d().hint}. Click for ${DENSITY[next()].label.toLowerCase()}.`}
       aria-label={`Row density: ${d().label}. Click for ${DENSITY[next()].label.toLowerCase()}.`}
-      onClick={() => setGridDensity(next())}
+      onClick={() => props.onChange(next())}
       class={cn(
         "inline-flex h-5 items-center gap-1 rounded px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        gridDensity() === "normal" ? "text-muted-foreground hover:bg-accent/60 hover:text-foreground" : "bg-accent text-foreground",
+        props.density === "normal" ? "text-muted-foreground hover:bg-accent/60 hover:text-foreground" : "bg-accent text-foreground",
       )}
     >
       <Dynamic component={d().icon} size={12} />
@@ -504,6 +549,27 @@ function ToggleButton(props: {
       {props.label}
     </button>
   );
+}
+
+/** An on/off setting for this browser under `key` ("1" / "0"), `initial` until set. */
+function rememberedFlag(key: string, initial: boolean) {
+  let start = initial;
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved === "1" || saved === "0") start = saved === "1";
+  } catch {
+    // storage blocked: use the default
+  }
+  const [get, set] = createSignal(start);
+  const update = (on: boolean) => {
+    set(on);
+    try {
+      localStorage.setItem(key, on ? "1" : "0");
+    } catch {
+      // just don't remember
+    }
+  };
+  return [get, update] as const;
 }
 
 /** Rows per page last chosen for this grid (`<storageKey>:page-size`), or 50. */
@@ -554,6 +620,8 @@ function HeaderFilter(props: {
   /** Ticked values; empty = no filter. */
   value: string[];
   onChange: (value: string[]) => void;
+  /** The column's name, shown in the button (the whole header opens the filter). */
+  label?: JSX.Element;
 }) {
   const [pos, setPos] = createSignal<{ top: number; left: number } | null>(null);
   let button!: HTMLButtonElement;
@@ -646,10 +714,14 @@ function HeaderFilter(props: {
         onClick={() => (pos() ? close() : open())}
         class={cn(
           "flex h-6 min-w-6 items-center justify-center gap-0.5 rounded px-1 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          props.label !== undefined && "-mx-1 gap-1",
           props.value.length > 0 && "bg-accent text-foreground",
         )}
       >
-        <Funnel size={12} />
+        <Show when={props.label !== undefined}>
+          <span>{props.label}</span>
+        </Show>
+        <Funnel size={12} class={cn(props.label !== undefined && props.value.length === 0 && "opacity-50")} />
         <Show when={props.value.length > 0}>
           <span class="text-[10px] font-semibold tabular-nums">{props.value.length}</span>
         </Show>

@@ -1,13 +1,20 @@
-import { createContext, createEffect, createMemo, createResource, createSignal, For, on, Show, useContext } from "solid-js";
+import { createContext, createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show, useContext } from "solid-js";
 import { Link } from "@tanstack/solid-router";
 import type { ColumnDef } from "@tanstack/solid-table";
 import Check from "lucide-solid/icons/check";
+import ChevronLeft from "lucide-solid/icons/chevron-left";
+import Ellipsis from "lucide-solid/icons/ellipsis";
 import ChevronUp from "lucide-solid/icons/chevron-up";
 import Hand from "lucide-solid/icons/hand";
 import Paperclip from "lucide-solid/icons/paperclip";
+import PencilLine from "lucide-solid/icons/pencil-line";
+import Settings2 from "lucide-solid/icons/settings-2";
+import Split from "lucide-solid/icons/split";
+import X from "lucide-solid/icons/x";
 import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/components/DataGrid";
 import { Menu, menuItemClass, useMenu } from "~/components/ui/menu";
 import { can } from "~/lib/orgs";
+import { applyChips, type Chip, fetchFilterGroups, type FilterGroup, groupChips } from "~/lib/quickFilters";
 import {
   amountValue,
   fetchOrgTransactions,
@@ -41,6 +48,17 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
     meta: { width: "w-32" } satisfies Meta,
   },
   {
+    id: "effective_date",
+    accessorFn: (t) => t.effective_date ?? "",
+    header: "Effective",
+    cell: (c) => (
+      <Show when={c.row.original.effective_date} fallback={<span class="text-muted-foreground/50">—</span>}>
+        {(d) => <span class="whitespace-nowrap text-muted-foreground">{formatDate(d())}</span>}
+      </Show>
+    ),
+    meta: { width: "w-32", label: "Effective date" } satisfies Meta,
+  },
+  {
     accessorKey: "month",
     header: "Month",
     cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{c.getValue<string>()}</span>,
@@ -52,8 +70,26 @@ const columns: ColumnDef<OrgTransaction, any>[] = [
   {
     accessorKey: "description",
     header: "Description",
-    // Kept exactly as stored (trailing spaces and "_" suffixes are part of the id).
-    cell: (c) => <span class="whitespace-pre-wrap break-words">{c.getValue<string>()}</span>,
+    // Kept exactly as the statement gives it. Split rows (added by hand) and rows that have a split
+    // are marked.
+    cell: (c) => (
+      <span class="whitespace-pre-wrap break-words">
+        <Show when={c.row.original.hand_added && c.row.original.split_of === null}>
+          <span class="mr-1.5 inline-flex align-[-2px] text-muted-foreground" title="Added by hand (not from a bank statement)">
+            <PencilLine size={13} />
+          </span>
+        </Show>
+        <Show when={c.row.original.split_of !== null || c.row.original.split_rows > 0}>
+          <span
+            class="mr-1.5 inline-flex align-[-2px] text-muted-foreground"
+            title={c.row.original.split_of !== null ? "Part of a split (added by hand)" : `Split into ${c.row.original.split_rows} rows`}
+          >
+            <Split size={13} />
+          </span>
+        </Show>
+        {c.getValue<string>()}
+      </span>
+    ),
     enableHiding: false,
   },
   {
@@ -301,10 +337,167 @@ function NoTransactions() {
   );
 }
 
+function readActive(key: string): Set<string> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return new Set(Array.isArray(saved) ? saved.filter((x): x is string => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeActive(key: string, active: Set<string>) {
+  try {
+    localStorage.setItem(key, JSON.stringify([...active]));
+  } catch {
+    // storage blocked: just don't remember
+  }
+}
+
+/**
+ * The quick filters, in a "⋯" menu by the grid's Columns button: the groups, each opening a
+ * panel of its toggles. Within a group, toggled filters combine with OR; groups with AND. The
+ * button shows how many are on. Toggles keep the menu open; Escape or a click outside closes it.
+ */
+function QuickFilterMenu(props: {
+  groups: { group: FilterGroup; chips: Chip[] }[];
+  active: Set<string>;
+  onToggle: (id: string) => void;
+  onClear: () => void;
+}) {
+  const org = useOrg();
+  const [open, setOpen] = createSignal(false);
+  // The group whose toggles are showing.
+  const [shown, setShown] = createSignal<string | null>(null);
+  let root!: HTMLDivElement;
+  let button!: HTMLButtonElement;
+
+  const activeChips = () => props.groups.flatMap((g) => g.chips.filter((c) => props.active.has(c.id)));
+  const onIn = (g: { chips: Chip[] }) => g.chips.filter((c) => props.active.has(c.id)).length;
+  const close = (refocus = false) => {
+    setOpen(false);
+    setShown(null);
+    if (refocus) button.focus();
+  };
+
+  const onPointerDown = (e: PointerEvent) => {
+    if (open() && !root.contains(e.target as Node)) close();
+  };
+  document.addEventListener("pointerdown", onPointerDown);
+  onCleanup(() => document.removeEventListener("pointerdown", onPointerDown));
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== "Escape" || !open()) return;
+    e.preventDefault();
+    // Escape steps back: the group's panel first, then the menu.
+    if (shown()) setShown(null);
+    else close(true);
+  };
+
+  const panel = "absolute z-30 w-60 rounded-lg border border-border bg-background p-1 text-foreground shadow-xl";
+  const item =
+    "flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm outline-none transition-colors hover:bg-accent focus-visible:bg-accent";
+
+  return (
+    <div ref={root} class="relative" onKeyDown={onKeyDown}>
+      <button
+        ref={button}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open()}
+        aria-label="Quick filters"
+        title={activeChips().length ? `Quick filters: ${activeChips().map((c) => c.label).join(", ")}` : "Quick filters"}
+        onClick={() => (open() ? close() : setOpen(true))}
+        class={cn(
+          "relative inline-flex h-9 w-9 items-center justify-center rounded-md border text-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          activeChips().length ? "border-primary text-foreground" : "border-input",
+        )}
+      >
+        <Ellipsis size={16} />
+        <Show when={activeChips().length}>
+          <span class="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
+            {activeChips().length}
+          </span>
+        </Show>
+      </button>
+
+      <Show when={open()}>
+        <div role="menu" aria-label="Quick filters" class={cn(panel, "right-0 top-full mt-1")}>
+          <p class="px-2.5 pb-1 pt-2 text-xs font-medium text-muted-foreground">Quick filters</p>
+          <For
+            each={props.groups}
+            fallback={<p class="px-2.5 py-2 text-sm text-muted-foreground">None set up yet.</p>}
+          >
+            {(g) => (
+              <div class="relative">
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={shown() === g.group.name}
+                  onClick={() => setShown(shown() === g.group.name ? null : g.group.name)}
+                  class={cn(item, shown() === g.group.name && "bg-accent")}
+                >
+                  <ChevronLeft size={14} class="text-muted-foreground" />
+                  <span class="min-w-0 flex-1 truncate">{g.group.name}</span>
+                  <Show when={onIn(g)}>
+                    <span class="rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">{onIn(g)}</span>
+                  </Show>
+                </button>
+                {/* The group's toggles, to the left (the menu sits at the grid's right edge). */}
+                <Show when={shown() === g.group.name}>
+                  <div role="menu" aria-label={g.group.name} class={cn(panel, "right-full top-0 mr-1 max-h-80 overflow-y-auto")}>
+                    <p class="px-2.5 pb-1 pt-2 text-xs font-medium text-muted-foreground">{g.group.name}</p>
+                    <For each={g.chips}>
+                      {(c) => (
+                        <button
+                          type="button"
+                          role="menuitemcheckbox"
+                          aria-checked={props.active.has(c.id)}
+                          title={c.title}
+                          onClick={() => props.onToggle(c.id)}
+                          class={item}
+                        >
+                          <span
+                            class={cn(
+                              "flex h-4 w-4 shrink-0 items-center justify-center rounded border",
+                              props.active.has(c.id) ? "border-primary bg-primary text-primary-foreground" : "border-input",
+                            )}
+                          >
+                            <Show when={props.active.has(c.id)}>
+                              <Check size={12} />
+                            </Show>
+                          </span>
+                          <span class="min-w-0 flex-1 truncate">{c.label}</span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            )}
+          </For>
+          <div role="separator" class="my-1 h-px bg-border" />
+          <Show when={activeChips().length}>
+            <button type="button" role="menuitem" onClick={props.onClear} class={item}>
+              <X size={14} class="text-muted-foreground" /> Clear quick filters
+            </button>
+          </Show>
+          <Show when={can(org, "write-statements")}>
+            <Link to="/portal/$org/statements/filters" params={{ org: org.slug }} role="menuitem" class={item} onClick={() => close()}>
+              <Settings2 size={14} class="text-muted-foreground" /> Edit quick filters
+            </Link>
+          </Show>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
 function TransactionsView(props: { acct: AccountState }) {
   const org = useOrg();
   // Each result carries its account, so rows from the previous account never show under the new one.
-  const [rows, { mutate }] = createResource(
+  const [rows, { mutate, refetch }] = createResource(
     () => {
       const a = props.acct.account();
       return a ? { account: a.id } : undefined;
@@ -321,6 +514,28 @@ function TransactionsView(props: { acct: AccountState }) {
   const gridKey = createMemo(() => (current() ? `account:${current()!.account}` : undefined));
 
   const [types, { refetch: refetchTypes }] = createResource(() => org.slug, fetchTypes);
+
+  // Quick filters: chips above the grid. Toggled ones are remembered per org in this browser.
+  const [filterGroups] = createResource(() => org.slug, fetchFilterGroups);
+  const chipGroups = createMemo(() =>
+    (settled(filterGroups) ?? [])
+      .map((group) => ({ group, chips: groupChips(group, current()?.rows ?? []) }))
+      .filter((g) => g.chips.length > 0),
+  );
+  const activeKey = `quick-filters:${org.slug}`;
+  const [active, setActive] = createSignal<Set<string>>(readActive(activeKey));
+  const toggle = (id: string) => {
+    const next = new Set(active());
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setActive(next);
+    writeActive(activeKey, next);
+  };
+  const clearChips = () => {
+    setActive(new Set<string>());
+    writeActive(activeKey, new Set());
+  };
+  const shownRows = createMemo(() => applyChips(current()?.rows ?? [], chipGroups(), active()));
   /** Updates one row in place (the grid keeps its filters, sorting and page). */
   const patchRow = (id: number, patch: Partial<OrgTransaction>) =>
     mutate((d) => d && { ...d, rows: d.rows.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
@@ -345,7 +560,7 @@ function TransactionsView(props: { acct: AccountState }) {
   };
 
   return (
-    <div class="mt-6 flex min-h-0 flex-1 flex-col">
+    <div class="mt-3 flex min-h-0 flex-1 flex-col">
       <Show when={error()}>
         {(e) => <p class="text-sm text-red-500">{e() instanceof Error ? (e() as Error).message : "Couldn't load transactions."}</p>}
       </Show>
@@ -361,7 +576,8 @@ function TransactionsView(props: { acct: AccountState }) {
           <Show when={(current()?.rows.length ?? 0) > 0} fallback={<NoTransactions />}>
             <RowEditingContext.Provider value={editing}>
               <DataGrid
-                rows={current()?.rows ?? []}
+                rows={shownRows()}
+                toolbarEnd={<QuickFilterMenu groups={chipGroups()} active={active()} onToggle={toggle} onClear={clearChips} />}
                 columns={columns}
                 initialSorting={[{ id: "date", desc: false }]}
                 search={(t, q) => [t.description, t.type ?? "", t.amount, t.month].some((v) => v.toLowerCase().includes(q))}
@@ -390,7 +606,11 @@ function TransactionsView(props: { acct: AccountState }) {
             rowId={id}
             types={editing.types()}
             setType={editing.setType}
-            onChanged={(c) => patchRow(c.id, { type: c.type, type_manual: c.type_manual, attachments: c.attachments })}
+            onChanged={(c) =>
+              patchRow(c.id, { type: c.type, type_manual: c.type_manual, effective_date: c.effective_date, attachments: c.attachments })
+            }
+            onRowsChanged={() => void refetch()}
+            onOpenRow={setOpenRow}
             onClose={() => setOpenRow(null)}
           />
         )}

@@ -173,7 +173,7 @@ fn plan(layout: &Layout, write_header: bool, existing: &Existing, txs: &[Transac
     let mut updates = Vec::new();
     let mut seen = HashSet::new();
     for t in txs {
-        match existing.rows.get(&i64::from(t.id)) {
+        match existing.rows.get(&t.id) {
             None => new.push(t),
             Some(rows) => {
                 let Some(category) = t.category.as_ref().filter(|_| has_type) else {
@@ -249,14 +249,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn tx(id: i32, date: &str, description: &str, amount: &str) -> Transaction {
+    fn tx(id: i64, date: &str, description: &str, amount: &str) -> Transaction {
         Transaction {
             id,
+            occurrence: 0,
             date: date.into(),
             description: description.into(),
             amount: amount.into(),
             currency: "ZAR".into(),
             category: None,
+            effective_date: None,
+            hand_added: false,
         }
     }
 

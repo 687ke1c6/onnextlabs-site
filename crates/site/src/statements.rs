@@ -1,13 +1,14 @@
 //! Bank statements, per organisation (`/portal/<org>/statements`).
 //!
-//! A statement file is parsed by `statements-core` (format detection, the prod n8n row ids,
-//! type rules) and saved as an *upload*. Its rows are stored once per
-//! `(org, account, n8n id)` and linked to every upload that contained them, so saving a
-//! statement again updates rows instead of duplicating them. A save never blanks a type: when
-//! no rule matches, the stored type is kept.
+//! A statement file is parsed by `statements-core` (format detection, row ids, type rules) and
+//! saved as an *upload*. Its rows are stored once per `(account, row id)` and linked to every
+//! upload that contained them, so saving a statement again (or the same rows in another format)
+//! updates rows instead of duplicating them. A save never blanks a type: when no rule matches,
+//! the stored type is kept.
 //!
-//! The n8n id is the prod hash of date, description and amount, unchanged: it's what the
-//! Google Sheets copy is keyed on (`statements_google`).
+//! The row id (`txn_id`) is a hash of the date, amount, normalised description and occurrence
+//! (statements-core `id.rs`): it's also what the Google Sheets copy is keyed on
+//! (`statements_google`).
 //!
 //! API: list and view uploads, view type rules (`read-statements`); preview, save and delete
 //! uploads, edit type rules (`write-statements`). Saving a copy to Documents also needs
@@ -33,9 +34,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use statements_core::{
     categories::{categorise, CategoryRule},
-    hash::DateFormat,
     row::month_label,
-    statement::{self, Format, Statement, Transaction},
+    statement::{self, Format, IdCheck, Statement, Transaction},
 };
 
 use crate::statement_accounts::{self, Account};
@@ -151,12 +151,12 @@ struct UploadForm {
     bytes: Bytes,
     /// `account`: the account (id) the statement is for.
     account: Option<i64>,
-    /// `types`: JSON `{"<n8n id>": "TYPE" | null}`, the types picked in the preview.
+    /// `types`: JSON `{"<row id>": "TYPE" | null}`, the types picked in the preview.
     types: Option<String>,
 }
 
-/// Types picked by hand in the preview, by n8n id: a type, or `None` to clear it.
-type Picks = HashMap<i32, Option<String>>;
+/// Types picked by hand in the preview, by row id: a type, or `None` to clear it.
+type Picks = HashMap<i64, Option<String>>;
 
 /// Multipart fields: `file` and `account` (required), `types` (optional, see `UploadForm`).
 async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadForm, Response> {
@@ -216,10 +216,10 @@ async fn read_picks(
     };
     let wanted: HashMap<String, Option<String>> =
         serde_json::from_str(raw).map_err(|_| bad_request("The chosen types couldn't be read."))?;
-    let ids: HashSet<i32> = st.transactions.iter().map(|t| t.id).collect();
+    let ids: HashSet<i64> = st.transactions.iter().map(|t| t.id).collect();
     let mut picks = Picks::new();
     for (key, name) in wanted {
-        let id: i32 = key
+        let id: i64 = key
             .parse()
             .ok()
             .filter(|id| ids.contains(id))
@@ -240,9 +240,16 @@ async fn read_picks(
     Ok(picks)
 }
 
-/// Detects the format, parses, assigns the n8n ids and applies the type rules.
-fn parse_statement(bytes: &[u8], rules: &[CategoryRule]) -> Result<Statement, Response> {
-    let mut statement = statement::parse(bytes, DateFormat::UtcTimestamp).map_err(|e| {
+/// Types the file itself gives, by row id (`googlesheet_csv`'s `type` column), as written.
+type FileTypes = HashMap<i64, String>;
+
+/// Detects the format, parses, assigns the row ids and applies the type rules. Rules only fill rows the
+/// file didn't give a type; those are returned separately, as they're saved as hand-set.
+fn parse_statement(
+    bytes: &[u8],
+    rules: &[CategoryRule],
+) -> Result<(Statement, FileTypes), Response> {
+    let mut statement = statement::parse(bytes).map_err(|e| {
         error(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!("This file couldn't be read as a statement: {e:#}"),
@@ -254,8 +261,54 @@ fn parse_statement(bytes: &[u8], rules: &[CategoryRule]) -> Result<Statement, Re
             "This statement has no transactions.",
         ));
     }
+    let file_types = statement
+        .transactions
+        .iter()
+        .filter_map(|t| Some((t.id, t.category.clone()?)))
+        .collect();
     categorise(rules, &mut statement);
-    Ok(statement)
+    Ok((statement, file_types))
+}
+
+/// The file's types as they'd be saved: each in the types list's spelling, except on rows whose
+/// stored type is hand-set (that stays, as with any save). With `create`, types not on the list
+/// are added to it; without, they keep the file's spelling. Returns the picks and the types not
+/// on the list (before any were added), sorted.
+async fn file_picks(
+    db: &Db,
+    org_id: i64,
+    file_types: &FileTypes,
+    stored: &HashMap<i64, (Option<String>, bool)>,
+    create: bool,
+) -> Result<(HashMap<i64, String>, Vec<String>), Response> {
+    let mut names: HashMap<&str, String> = HashMap::new();
+    let mut new_types = BTreeSet::new();
+    for raw in file_types.values() {
+        if names.contains_key(raw.as_str()) {
+            continue;
+        }
+        let name = match crate::statement_types::canonical_name(db, org_id, raw)
+            .await
+            .map_err(db_error)?
+        {
+            Some(name) => name,
+            None => {
+                new_types.insert(raw.trim().to_string());
+                if create {
+                    crate::statement_types::ensure_type(db, org_id, raw).await?
+                } else {
+                    raw.trim().to_string()
+                }
+            }
+        };
+        names.insert(raw, name);
+    }
+    let picks = file_types
+        .iter()
+        .filter(|(id, _)| !stored.get(id).is_some_and(|(_, manual)| *manual))
+        .map(|(id, raw)| (*id, names[raw.as_str()].clone()))
+        .collect();
+    Ok((picks, new_types.into_iter().collect()))
 }
 
 /// The file's name without any directory part or control characters, shortened.
@@ -330,6 +383,11 @@ struct Preview {
     new: usize,
     existing: usize,
     transactions: Vec<PreviewRow>,
+    /// Formats that state their rows' ids (`googlesheet_csv`): how they compare with the ids
+    /// computed from the rows.
+    id_check: Option<IdCheck>,
+    /// Types the file gives that aren't on the org's list yet; saving adds them.
+    new_types: Vec<String>,
     /// Where the copy of the file goes in Documents...
     documents_folder: String,
     /// ...unless this exact file is already there, in which case that one is used.
@@ -338,7 +396,7 @@ struct Preview {
 
 #[derive(Serialize)]
 struct PreviewRow {
-    txn_id: i32,
+    txn_id: i64,
     date: String,
     amount: String,
     description: String,
@@ -351,6 +409,7 @@ struct PreviewRow {
     type_manual: bool,
     /// Already stored for this org and account.
     stored: bool,
+    effective_date: Option<String>,
 }
 
 /// POST /api/orgs/{org}/statements/preview — parse without saving anything.
@@ -364,8 +423,10 @@ async fn preview(
     let form = read_form(multipart, state.max_upload_bytes).await?;
     let account = target_account(&state.db, org.id, &form).await?;
     let rules = account_rules(&state.db, account.id).await?;
-    let st = parse_statement(&form.bytes, &rules)?;
+    let (st, file_types) = parse_statement(&form.bytes, &rules)?;
     let stored = stored_types(&state.db, account.id).await?;
+    let (file_picks, new_types) =
+        file_picks(&state.db, org.id, &file_types, &stored, false).await?;
     let stated = stated_account(&st);
     let account_check = check_account(&account, &stated);
     let suggested_account = if matches!(
@@ -378,10 +439,11 @@ async fn preview(
     };
     let txs = &st.transactions;
     // (type, hand-set) as saving would leave it.
-    let effective = |t: &Transaction| match stored.get(&t.id) {
-        Some((typ, true)) => (typ.clone(), true),
-        Some((typ, false)) => (t.category.clone().or_else(|| typ.clone()), false),
-        None => (t.category.clone(), false),
+    let effective = |t: &Transaction| match (stored.get(&t.id), file_picks.get(&t.id)) {
+        (Some((typ, true)), _) => (typ.clone(), true),
+        (_, Some(typ)) => (Some(typ.clone()), true),
+        (Some((typ, false)), None) => (t.category.clone().or_else(|| typ.clone()), false),
+        (None, None) => (t.category.clone(), false),
     };
     let existing = txs.iter().filter(|t| stored.contains_key(&t.id)).count();
     let sha256 = hex::encode(Sha256::digest(&form.bytes));
@@ -410,9 +472,12 @@ async fn preview(
                     category,
                     type_manual,
                     stored: stored.contains_key(&t.id),
+                    effective_date: t.effective_date.clone(),
                 }
             })
             .collect(),
+        id_check: st.id_check.clone(),
+        new_types,
         documents_folder: statement_folder(&account.name),
         existing_document,
         account,
@@ -421,11 +486,11 @@ async fn preview(
     }))
 }
 
-/// The rows already stored in this account: n8n id -> (type, hand-set).
+/// The rows already stored in this account: row id -> (type, hand-set).
 async fn stored_types(
     db: &Db,
     account_id: i64,
-) -> Result<HashMap<i32, (Option<String>, bool)>, Response> {
+) -> Result<HashMap<i64, (Option<String>, bool)>, Response> {
     let rows: Vec<(i64, Option<String>, bool)> = db::query_as(
         "SELECT txn_id, type, type_manual FROM statement_transactions WHERE account_id = ?",
     )
@@ -435,7 +500,7 @@ async fn stored_types(
     .map_err(db_error)?;
     Ok(rows
         .into_iter()
-        .filter_map(|(id, typ, manual)| Some((i32::try_from(id).ok()?, (typ, manual))))
+        .map(|(id, typ, manual)| (id, (typ, manual)))
         .collect())
 }
 
@@ -455,8 +520,9 @@ async fn save(
     // A mismatch with the account's identifier is shown in the preview, never refused here.
     let account = target_account(&state.db, org.id, &form).await?;
     let rules = account_rules(&state.db, account.id).await?;
-    let st = parse_statement(&form.bytes, &rules)?;
-    let picks = read_picks(&state.db, org.id, form.types.as_deref(), &st).await?;
+    let (st, file_types) = parse_statement(&form.bytes, &rules)?;
+    let user_picks = read_picks(&state.db, org.id, form.types.as_deref(), &st).await?;
+    let picks = save_picks(&state.db, org.id, account.id, &file_types, user_picks).await?;
     let sha256 = hex::encode(Sha256::digest(&form.bytes));
 
     // The file first: storage is the likelier failure, and nothing is in the database yet.
@@ -504,6 +570,25 @@ async fn save(
         "statement saved"
     );
     Ok((StatusCode::CREATED, Json(detail)))
+}
+
+/// The types a save stores as hand-set: the file's own (added to the list if missing; a stored
+/// hand-set type stays), then the ones picked in the preview, which win.
+async fn save_picks(
+    db: &Db,
+    org_id: i64,
+    account_id: i64,
+    file_types: &FileTypes,
+    user_picks: Picks,
+) -> Result<Picks, Response> {
+    let stored = stored_types(db, account_id).await?;
+    let (file_picks, _) = file_picks(db, org_id, file_types, &stored, true).await?;
+    let mut picks: Picks = file_picks
+        .into_iter()
+        .map(|(id, t)| (id, Some(t)))
+        .collect();
+    picks.extend(user_picks);
+    Ok(picks)
 }
 
 /// Tests: the account whose identifier is `stated` (created if needed; '' = "No account
@@ -557,7 +642,10 @@ async fn store(
 }
 
 /// One database transaction: the upload row, then each statement row upserted on
-/// `(account, n8n id)` and linked to the upload in file order.
+/// `(account, row id)` and linked to the upload in file order.
+///
+/// An effective date in the file is stored; a row without one keeps any it has. A row stays
+/// hand-added (deletable) only while no statement that isn't hand-added contains it.
 ///
 /// Types: a type picked in the preview (`picks`) is stored as hand-set; clearing one there
 /// stores the row blank and not hand-set. Otherwise a stored hand-set type is kept, and a
@@ -577,7 +665,7 @@ async fn store_with(
     // One batch, decided up front. New/updated counts follow the file: a row whose id was
     // stored before is "updated"; one that wasn't is "new" the first time it appears and
     // "updated" for any repeat. So new = distinct ids not yet stored; updated = the rest.
-    let ids: BTreeSet<i32> = st.transactions.iter().map(|t| t.id).collect();
+    let ids: BTreeSet<i64> = st.transactions.iter().map(|t| t.id).collect();
     let ids_json = serde_json::to_string(&ids).expect("ids serialise");
     let parsed = st.transactions.len() as i64;
 
@@ -611,12 +699,14 @@ async fn store_with(
             Some(chosen) => batch.push(
                 "INSERT INTO statement_transactions
                      (org_id, account_id, txn_id, date, amount, description, currency, type,
-                      type_manual)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      type_manual, effective_date, occurrence, hand_added)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (account_id, txn_id) DO UPDATE SET
                      date = excluded.date, amount = excluded.amount,
                      description = excluded.description, currency = excluded.currency,
                      type = excluded.type, type_manual = excluded.type_manual,
+                     effective_date = coalesce(excluded.effective_date, effective_date),
+                     hand_added = min(hand_added, excluded.hand_added),
                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
                 params![
                     org.id,
@@ -628,18 +718,23 @@ async fn store_with(
                     &t.currency,
                     chosen.clone(),
                     chosen.is_some(),
+                    t.effective_date.clone(),
+                    t.occurrence,
+                    t.hand_added,
                 ],
             ),
             // From the rules: a hand-set type is never changed, and a blank never replaces one.
             None => batch.push(
                 "INSERT INTO statement_transactions
                      (org_id, account_id, txn_id, date, amount, description, currency, type,
-                      type_manual)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                      type_manual, effective_date, occurrence, hand_added)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                  ON CONFLICT (account_id, txn_id) DO UPDATE SET
                      date = excluded.date, amount = excluded.amount,
                      description = excluded.description, currency = excluded.currency,
                      type = CASE WHEN type_manual = 1 THEN type ELSE coalesce(excluded.type, type) END,
+                     effective_date = coalesce(excluded.effective_date, effective_date),
+                     hand_added = min(hand_added, excluded.hand_added),
                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
                 params![
                     org.id,
@@ -650,6 +745,9 @@ async fn store_with(
                     &t.description,
                     &t.currency,
                     t.category.clone(),
+                    t.effective_date.clone(),
+                    t.occurrence,
+                    t.hand_added,
                 ],
             ),
         };
@@ -728,6 +826,10 @@ pub struct StoredTransaction {
     pub currency: String,
     #[serde(rename = "type")]
     pub category: Option<String>,
+    pub effective_date: Option<String>,
+    pub occurrence: u32,
+    /// A split row: the original row's `txn_id`.
+    pub split_of: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -783,7 +885,8 @@ pub async fn upload_detail(db: &Db, org_id: i64, id: i64) -> Result<UploadDetail
         .map_err(db_error)?
         .ok_or_else(|| not_found("Statement not found."))?;
     let transactions = db::query_as(
-        "SELECT t.txn_id, t.date, t.amount, t.description, t.currency, t.type
+        "SELECT t.txn_id, t.date, t.amount, t.description, t.currency, t.type, t.effective_date,
+                t.occurrence, t.split_of
          FROM statement_upload_transactions l
          JOIN statement_transactions t ON t.id = l.transaction_id
          WHERE l.upload_id = ? ORDER BY l.position",
@@ -800,10 +903,30 @@ pub async fn upload_detail(db: &Db, org_id: i64, id: i64) -> Result<UploadDetail
     })
 }
 
+/// The split rows of the rows `parents` (their `txn_id`s) in the account, each split's rows in the
+/// order added.
+pub async fn split_rows_of(
+    db: &Db,
+    account_id: i64,
+    parents: &[i64],
+) -> db::Result<Vec<StoredTransaction>> {
+    db::query_as(
+        "SELECT txn_id, date, amount, description, currency, type, effective_date, occurrence,
+                split_of
+         FROM statement_transactions
+         WHERE account_id = ? AND split_of IN (SELECT value FROM json_each(?))
+         ORDER BY split_of, id",
+    )
+    .bind(account_id)
+    .bind(serde_json::to_string(parents).expect("ids serialise"))
+    .fetch_all(db)
+    .await
+}
+
 /// A stored row with where it came from, for the org-wide transactions grid.
 #[derive(Serialize, Deserialize)]
 struct OrgTransaction {
-    /// The row's own id (for editing it); `txn_id` is the n8n id.
+    /// The row's own id (for editing it); `txn_id` is the row id from the statement.
     id: i64,
     txn_id: i64,
     account_id: i64,
@@ -818,6 +941,13 @@ struct OrgTransaction {
     category: Option<String>,
     /// The type was picked by hand: saving a statement won't change it.
     type_manual: bool,
+    effective_date: Option<String>,
+    /// A split row: the original row's `txn_id`.
+    split_of: Option<i64>,
+    /// A statement row: how many rows its split has (0 = not split).
+    split_rows: i64,
+    /// Not from a bank statement (a split row, or a Google Sheet row without an id).
+    hand_added: bool,
     /// Documents attached to the row.
     attachments: i64,
     updated_at: String,
@@ -849,7 +979,9 @@ async fn org_transactions(
 ) -> db::Result<Vec<OrgTransaction>> {
     db::query_as(
         "SELECT t.id, t.txn_id, t.account_id, t.date, t.amount, t.description, t.currency, t.type,
-                t.type_manual,
+                t.type_manual, t.effective_date, t.split_of, t.hand_added,
+                (SELECT count(*) FROM statement_transactions s
+                 WHERE s.account_id = t.account_id AND s.split_of = t.txn_id) AS split_rows,
                 (SELECT count(*) FROM statement_transaction_documents d WHERE d.transaction_id = t.id)
                     AS attachments,
                 t.updated_at, u.id AS upload_id, u.filename AS upload_filename
@@ -1219,11 +1351,14 @@ fn changes_for(
         .filter_map(|r| {
             let t = Transaction {
                 id: 0,
+                occurrence: 0,
                 date: r.date,
                 description: r.description,
                 amount: r.amount,
                 currency: r.currency,
                 category: None,
+                effective_date: None,
+                hand_added: false,
             };
             let rule = rules.iter().position(|rule| rule.matches(&t, format))?;
             if only.is_some_and(|i| i != rule) {
@@ -1440,7 +1575,9 @@ mod tests {
         include_bytes!("../../statements-core/tests/fixtures/sb_csv_synthetic.csv");
 
     fn parsed(rules: &[RuleJson]) -> Statement {
-        parse_statement(SYNTHETIC, &validate_rules(rules).unwrap()).unwrap()
+        parse_statement(SYNTHETIC, &validate_rules(rules).unwrap())
+            .unwrap()
+            .0
     }
 
     async fn count(db: &Db, sql: &'static str) -> i64 {
@@ -1469,7 +1606,7 @@ mod tests {
         );
         // Both uploads list every row, in file order, with the prod ids.
         assert_eq!(d2.transactions.len() as i64, n);
-        let ids: Vec<i64> = st.transactions.iter().map(|t| i64::from(t.id)).collect();
+        let ids: Vec<i64> = st.transactions.iter().map(|t| t.id).collect();
         let stored: Vec<i64> = d2.transactions.iter().map(|t| t.txn_id).collect();
         assert_eq!(stored, ids);
     }
@@ -1623,8 +1760,8 @@ mod tests {
             .find(|t| t.category.is_none())
             .unwrap()
             .id;
-        let row = |rows: &[OrgTransaction], id: i32| {
-            let r = rows.iter().find(|r| r.txn_id == i64::from(id)).unwrap();
+        let row = |rows: &[OrgTransaction], id: i64| {
+            let r = rows.iter().find(|r| r.txn_id == id).unwrap();
             (r.category.clone(), r.type_manual)
         };
 
@@ -1879,5 +2016,184 @@ mod tests {
         assert!(rule("X", &[]).to_rule().is_err());
         assert!(rule(&"x".repeat(201), &["a"]).to_rule().is_err());
         assert!(validate_rules(&vec![rule("X", &["a"]); MAX_RULES + 1]).is_err());
+    }
+
+    const SHEET: &[u8] =
+        include_bytes!("../../statements-core/tests/fixtures/googlesheet_csv_synthetic.csv");
+
+    /// Parses the Google Sheet fixture with `rules` and saves it into `account` as the save
+    /// handler does, with `user_picks` as picked in the preview.
+    async fn save_sheet(
+        db: &Db,
+        org: &Org,
+        user: i64,
+        account: i64,
+        rules: &[RuleJson],
+        user_picks: Picks,
+    ) -> Statement {
+        let (st, file_types) = parse_statement(SHEET, &validate_rules(rules).unwrap()).unwrap();
+        let picks = save_picks(db, org.id, account, &file_types, user_picks)
+            .await
+            .unwrap();
+        store_with(db, org, account, user, "sheet.csv", "s", &st, None, &picks)
+            .await
+            .unwrap();
+        st
+    }
+
+    #[tokio::test]
+    async fn google_sheet_types_are_hand_set_and_join_the_list() {
+        let (db, org, user) = test_db().await;
+        let account = test_account(&db, org.id, "").await;
+        // "Fees" is already on the list: the sheet's "FEES" takes its spelling.
+        db::query("INSERT INTO statement_types (org_id, name) VALUES (?, 'Fees')")
+            .bind(org.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        // A rule only types rows the sheet left blank.
+        let st = save_sheet(
+            &db,
+            &org,
+            user,
+            account,
+            &[rule("MUNI", &["MUNICIPALITY", "FEE"])],
+            Picks::new(),
+        )
+        .await;
+        assert_eq!(st.format, Format::GoogleSheetCsv);
+
+        let rows = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        let by_desc = |d: &str| rows.iter().find(|r| r.description == d).unwrap();
+        let fee_at = |amount: &str| {
+            rows.iter()
+                .find(|r| r.description == "FIXED MONTHLY FEE " && r.amount == amount)
+                .unwrap()
+        };
+        let fee = fee_at("-120.00");
+        assert_eq!(
+            (fee.category.as_deref(), fee.type_manual),
+            (Some("Fees"), true)
+        );
+        let muni = by_desc("IB PAYMENT TO EXAMPLE MUNICIPALITY ACC 001");
+        assert_eq!(
+            (muni.category.as_deref(), muni.type_manual),
+            (Some("MUNI"), false)
+        );
+        // The zeroed duplicate (its n8n `_` removed) has no type in the sheet, so the rule types it.
+        assert_eq!(fee_at("0.00").category.as_deref(), Some("MUNI"));
+
+        let bond = by_desc("REGISTERED DC DEBIT HOME LOAN DC   0000001       280201");
+        assert_eq!(bond.effective_date.as_deref(), Some("2028-01-31"));
+        assert_eq!(bond.category.as_deref(), Some("BOND REPAYMENT"));
+        assert_eq!(rows.len(), 9);
+
+        let names: Vec<String> =
+            db::query_scalar("SELECT name FROM statement_types WHERE org_id = ? ORDER BY name")
+                .bind(org.id)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(names, ["BOND REPAYMENT", "Fees", "RENT"]);
+    }
+
+    #[tokio::test]
+    async fn google_sheet_types_never_replace_a_hand_set_one_but_preview_picks_do() {
+        let (db, org, user) = test_db().await;
+        let account = test_account(&db, org.id, "").await;
+        save_sheet(&db, &org, user, account, &[], Picks::new()).await;
+        let rows = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        let fee = rows
+            .iter()
+            .find(|r| r.description == "FIXED MONTHLY FEE " && r.amount == "-120.00")
+            .unwrap();
+        let rent = rows.iter().find(|r| r.description == "Split rent").unwrap();
+        crate::statement_types::set_type(&db, org.id, fee.id, Some("RENT"))
+            .await
+            .unwrap();
+
+        // Saving the sheet again keeps the type set in the app; a preview pick still wins.
+        let picks = Picks::from([(rent.txn_id, Some("FEES".to_string()))]);
+        save_sheet(&db, &org, user, account, &[], picks).await;
+        let rows = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        let typ = |id: i64| rows.iter().find(|r| r.id == id).unwrap().category.clone();
+        assert_eq!(typ(fee.id).as_deref(), Some("RENT"));
+        assert_eq!(typ(rent.id).as_deref(), Some("FEES"));
+    }
+
+    #[tokio::test]
+    async fn a_statement_without_an_effective_date_keeps_the_stored_one() {
+        let (db, org, user) = test_db().await;
+        let account = test_account(&db, org.id, "").await;
+        let st = save_sheet(&db, &org, user, account, &[], Picks::new()).await;
+
+        // The same rows again, as a bank statement would give them: no effective dates.
+        let mut bank = st.clone();
+        bank.format = Format::SbCsv;
+        for t in &mut bank.transactions {
+            t.effective_date = None;
+            t.category = None;
+        }
+        store_with(
+            &db,
+            &org,
+            account,
+            user,
+            "bank.csv",
+            "b",
+            &bank,
+            None,
+            &Picks::new(),
+        )
+        .await
+        .unwrap();
+        let rows = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        let dated: Vec<_> = rows
+            .iter()
+            .filter_map(|r| r.effective_date.as_deref())
+            .collect();
+        assert_eq!(dated, ["2028-02-29", "2028-01-31"]);
+    }
+
+    #[tokio::test]
+    async fn a_bank_statement_makes_a_hand_added_row_its_own() {
+        let (db, org, user) = test_db().await;
+        let account = test_account(&db, org.id, "").await;
+        let st = save_sheet(&db, &org, user, account, &[], Picks::new()).await;
+        let hand = |rows: &[OrgTransaction]| {
+            rows.iter()
+                .filter(|r| r.hand_added)
+                .map(|r| r.description.clone())
+                .collect::<Vec<_>>()
+        };
+        let rows = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        assert_eq!(hand(&rows), ["Split rent", "Split rent"]);
+
+        // A bank statement with the first of them.
+        let mut bank = st.clone();
+        bank.format = Format::SbCsv;
+        bank.transactions.retain(|t| t.hand_added);
+        bank.transactions.truncate(1);
+        bank.transactions[0].hand_added = false;
+        store_with(
+            &db,
+            &org,
+            account,
+            user,
+            "bank.csv",
+            "b",
+            &bank,
+            None,
+            &Picks::new(),
+        )
+        .await
+        .unwrap();
+        let rows = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        assert_eq!(hand(&rows), ["Split rent"]);
+
+        // Saving the sheet again doesn't make it hand-added again.
+        save_sheet(&db, &org, user, account, &[], Picks::new()).await;
+        let rows = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        assert_eq!(hand(&rows).len(), 1);
     }
 }

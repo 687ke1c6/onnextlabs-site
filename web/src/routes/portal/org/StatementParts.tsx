@@ -7,11 +7,11 @@ import { useOrg } from "~/routes/portal/org/OrgLayout";
 
 const TAB = "rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-/** Statement | Uploads | Type rules | Accounts, under the page header. */
+/** Statement | Uploads | Type rules | Quick filters | Accounts, under the page header. */
 export function StatementsTabs() {
   const org = useOrg();
   return (
-    <nav aria-label="Statements" class="mt-6 flex gap-1">
+    <nav aria-label="Statements" class="mt-3 flex gap-1">
       <Link
         to="/portal/$org/statements"
         params={{ org: org.slug }}
@@ -39,6 +39,15 @@ export function StatementsTabs() {
         inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
       >
         Type rules
+      </Link>
+      <Link
+        to="/portal/$org/statements/filters"
+        params={{ org: org.slug }}
+        class={TAB}
+        activeProps={{ class: "bg-secondary text-foreground" }}
+        inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
+      >
+        Quick filters
       </Link>
       <Link
         to="/portal/$org/statements/accounts"
@@ -83,7 +92,12 @@ export function TransactionsTable(props: {
           <For each={props.rows}>
             {(t) => (
               <tr class="border-b border-border last:border-0" title={`id ${t.txn_id}`}>
-                <td class="whitespace-nowrap px-4 py-2 text-muted-foreground">{formatDate(t.date)}</td>
+                <td class="whitespace-nowrap px-4 py-2 text-muted-foreground">
+                  {formatDate(t.date)}
+                  <Show when={t.effective_date}>
+                    {(d) => <span class="block text-xs" title="Effective date">eff. {formatDate(d())}</span>}
+                  </Show>
+                </td>
                 {/* Kept exactly as stored (trailing spaces and "_" suffixes are part of the id). */}
                 <td class="whitespace-pre-wrap break-words px-4 py-2">{t.description}</td>
                 <td class={cn("whitespace-nowrap px-4 py-2 text-right tabular-nums", isNegative(t.amount) ? "" : "text-emerald-600 dark:text-emerald-400")}>

@@ -28,12 +28,17 @@ function remembered(key: string, initial: boolean) {
 export type Density = "normal" | "compact" | "condensed";
 export const DENSITIES: Density[] = ["normal", "compact", "condensed"];
 
-function rememberedDensity() {
+/**
+ * One grid's density, remembered in this browser under `<storageKey>-density`. Until that grid has
+ * its own, it starts from the old setting shared by every grid (or the older on/off one).
+ */
+export function rememberedDensity(storageKey: string) {
+  const key = `${storageKey}-density`;
   let start: Density = "normal";
   try {
-    const saved = localStorage.getItem("grid-density");
+    const saved = localStorage.getItem(key) ?? localStorage.getItem("grid-density");
     if (DENSITIES.includes(saved as Density)) start = saved as Density;
-    else if (localStorage.getItem("grid-compact") === "1") start = "compact"; // the old on/off setting
+    else if (localStorage.getItem("grid-compact") === "1") start = "compact";
   } catch {
     // storage blocked: use the default
   }
@@ -41,14 +46,13 @@ function rememberedDensity() {
   const update = (v: Density) => {
     set(v);
     try {
-      localStorage.setItem("grid-density", v);
+      localStorage.setItem(key, v);
     } catch {
       // just don't remember
     }
   };
   return [get, update] as const;
 }
-export const [gridDensity, setGridDensity] = rememberedDensity();
 
 /** Grids: let the page use the full window width. */
 export const [wideGrids, setWideGrids] = remembered("grid-wide", false);

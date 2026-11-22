@@ -80,16 +80,19 @@ impl CategoryRule {
     }
 }
 
-/// Sets each transaction's category from the first matching rule (or none). Returns how many transactions got a
+/// Sets each transaction's category from the first matching rule (or none). A category the file itself gave
+/// (`googlesheet_csv`'s `type` column) is kept: rules only fill the rest. Returns how many transactions have a
 /// category.
 pub fn categorise(rules: &[CategoryRule], statement: &mut Statement) -> usize {
     let format = statement.format;
     let mut categorised = 0;
     for t in &mut statement.transactions {
-        t.category = rules
-            .iter()
-            .find(|r| r.matches(t, format))
-            .map(|r| r.category.clone());
+        if t.category.is_none() {
+            t.category = rules
+                .iter()
+                .find(|r| r.matches(t, format))
+                .map(|r| r.category.clone());
+        }
         categorised += usize::from(t.category.is_some());
     }
     categorised
@@ -113,15 +116,19 @@ mod tests {
         Statement {
             format: Format::SbCsv,
             account_number: None,
+            id_check: None,
             transactions: rows
                 .iter()
                 .map(|(description, amount)| Transaction {
                     id: 0,
+                    occurrence: 0,
                     date: "2027-01-01".into(),
                     description: (*description).into(),
                     amount: (*amount).into(),
                     currency: "ZAR".into(),
                     category: None,
+                    effective_date: None,
+                    hand_added: false,
                 })
                 .collect(),
         }
@@ -180,6 +187,14 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn a_category_from_the_file_is_kept() {
+        let mut s = statement(&[("RENT", "1"), ("RENT", "2")]);
+        s.transactions[0].category = Some("SPLIT".into());
+        assert_eq!(categorise(&[rule("RENT", &["RENT"])], &mut s), 2);
+        assert_eq!(categories(&s), [Some("SPLIT"), Some("RENT")]);
     }
 
     #[test]

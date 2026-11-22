@@ -43,23 +43,26 @@ pub fn parse(rows: &[csv::StringRecord]) -> Result<Parsed> {
 
         transactions.push(Transaction {
             id: 0,
+            occurrence: 0,
             date,
             description,
             amount: amount.to_string(),
             currency: "ZAR".into(),
             category: None,
+            effective_date: None,
+            hand_added: false,
         });
     }
     Ok(Parsed {
         account_number,
         transactions,
+        stated_ids: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::DateFormat;
     use crate::statement::{self, Format};
 
     #[derive(serde::Deserialize)]
@@ -76,7 +79,7 @@ mod tests {
     /// (`just oracle <csv>`).
     fn assert_matches_n8n(csv: &[u8], expected_json: &str, account: &str, label: &str) {
         let expected: Vec<N8nRow> = serde_json::from_str(expected_json).unwrap();
-        let statement = statement::parse(csv, DateFormat::UtcTimestamp).unwrap();
+        let statement = statement::parse(csv).unwrap();
 
         assert_eq!(statement.format, Format::SbCsv, "{label}");
         assert_eq!(
@@ -85,13 +88,21 @@ mod tests {
             "{label}"
         );
         assert_eq!(statement.transactions.len(), expected.len(), "{label}");
+        // n8n's ids and `_`-suffixed descriptions, reproduced; the rows themselves keep the bare description.
+        let n8n = statement::n8n_ids(&statement.transactions);
         for (i, (got, want)) in statement.transactions.iter().zip(&expected).enumerate() {
+            let (n8n_id, n8n_description) = &n8n[i];
+            assert_eq!(
+                want.description.trim_end_matches('_'),
+                got.description.trim_end_matches('_'),
+                "transaction {i}"
+            );
             assert_eq!(
                 (
-                    got.id,
+                    *n8n_id,
                     crate::row::month_label(&got.date),
                     got.date.as_str(),
-                    got.description.as_str(),
+                    n8n_description.as_str(),
                     got.amount.as_str(),
                     got.currency.as_str()
                 ),

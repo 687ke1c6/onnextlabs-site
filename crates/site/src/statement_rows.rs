@@ -31,7 +31,9 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/api/orgs/{org}/statement-transactions/{id}",
-            get(show).patch(statement_types::set_row_type),
+            get(show)
+                .patch(statement_types::set_row_type)
+                .delete(crate::statement_splits::delete_row),
         )
         .route(
             "/api/orgs/{org}/statement-transactions/{id}/documents",
@@ -58,6 +60,11 @@ struct RowFields {
     #[serde(rename = "type")]
     category: Option<String>,
     type_manual: bool,
+    effective_date: Option<String>,
+    /// Part of a split: the original row's `txn_id` (same account).
+    split_of: Option<i64>,
+    /// Not from a bank statement (split rows, Google Sheet rows without an id): can be deleted.
+    hand_added: bool,
     updated_at: String,
 }
 
@@ -85,20 +92,48 @@ struct AttachedDocument {
     missing: bool,
 }
 
+/// A row of a split, or the original row a split belongs to.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SplitRow {
+    pub id: i64,
+    pub txn_id: i64,
+    pub date: String,
+    pub effective_date: Option<String>,
+    pub description: String,
+    pub amount: String,
+    pub currency: String,
+    #[serde(rename = "type")]
+    pub category: Option<String>,
+}
+
 #[derive(Serialize)]
-struct RowDetail {
+pub(crate) struct RowDetail {
     #[serde(flatten)]
     row: RowFields,
     month: String,
     uploads: Vec<SourceUpload>,
     documents: Vec<AttachedDocument>,
+    /// A split row: the row it splits, if that's still stored.
+    split_parent: Option<SplitRow>,
+    /// A statement row: the rows of its split, if it has one.
+    splits: Vec<SplitRow>,
 }
 
-async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Response> {
+macro_rules! select_split_row {
+    ($tail:literal) => {
+        concat!(
+            "SELECT id, txn_id, date, effective_date, description, amount, currency, type
+             FROM statement_transactions ",
+            $tail
+        )
+    };
+}
+
+pub(crate) async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Response> {
     let row: RowFields = db::query_as(
         "SELECT t.id, t.txn_id, t.account_id, a.name AS account_name,
                 a.identifier AS account_identifier, t.date, t.amount, t.description, t.currency,
-                t.type, t.type_manual, t.updated_at
+                t.type, t.type_manual, t.effective_date, t.split_of, t.hand_added, t.updated_at
          FROM statement_transactions t JOIN statement_accounts a ON a.id = t.account_id
          WHERE t.id = ? AND t.org_id = ?",
     )
@@ -117,6 +152,23 @@ async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Respo
     .fetch_all(&state.db)
     .await
     .map_err(db_error)?;
+    let (split_parent, splits) = match row.split_of {
+        Some(parent) => {
+            let parent = db::query_as(select_split_row!("WHERE account_id = ? AND txn_id = ?"))
+                .bind(row.account_id)
+                .bind(parent)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(db_error)?;
+            (parent, Vec::new())
+        }
+        None => (
+            None,
+            split_rows(&state.db, row.account_id, row.txn_id)
+                .await
+                .map_err(db_error)?,
+        ),
+    };
     let mut documents = attached(&state.db, id).await.map_err(db_error)?;
     for d in &mut documents {
         d.missing = !documents::file_exists(state, org, &d.folder, &d.filename).await;
@@ -126,7 +178,20 @@ async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDetail, Respo
         row,
         uploads,
         documents,
+        split_parent,
+        splits,
     })
+}
+
+/// The rows of the split of the row `parent` (a `txn_id`) in the account, in the order added.
+pub(crate) async fn split_rows(db: &Db, account_id: i64, parent: i64) -> db::Result<Vec<SplitRow>> {
+    db::query_as(select_split_row!(
+        "WHERE account_id = ? AND split_of = ? ORDER BY id"
+    ))
+    .bind(account_id)
+    .bind(parent)
+    .fetch_all(db)
+    .await
 }
 
 async fn attached(db: &Db, row_id: i64) -> db::Result<Vec<AttachedDocument>> {

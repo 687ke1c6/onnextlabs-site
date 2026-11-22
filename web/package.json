@@ -2,7 +2,7 @@
   "name": "onnextlabs-web",
   "private": true,
   "packageManager": "bun@1.4.3",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "dev": "bun --bun vite",

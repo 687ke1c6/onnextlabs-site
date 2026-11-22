@@ -407,7 +407,8 @@ export function PortalLayout() {
               }}
             >
               <Rail user={user()} orgs={settled(orgs) ?? []} onSignOut={signOut} />
-              <main class={cn("min-w-0 flex-1 px-4 py-8 sm:px-8", pageHasGrid() && "overflow-y-auto")}>
+              {/* Grid pages fill the window, so they keep their padding short. */}
+              <main class={cn("min-w-0 flex-1 px-4 sm:px-8", pageHasGrid() ? "overflow-y-auto py-4" : "py-8")}>
                 <div
                   class={cn(
                     "mx-auto w-full",

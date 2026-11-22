@@ -74,6 +74,37 @@ pub async fn canonical_name(db: &Db, org_id: i64, name: &str) -> db::Result<Opti
         .await
 }
 
+/// `name` in the list's spelling, adding it to the list if it isn't there (a statement's own
+/// types, e.g. a Google Sheet export's). Refused if it isn't a valid name or the list is full.
+pub async fn ensure_type(db: &Db, org_id: i64, name: &str) -> Result<String, Response> {
+    if let Some(existing) = canonical_name(db, org_id, name).await.map_err(db_error)? {
+        return Ok(existing);
+    }
+    let name = clean_name(name).map_err(|_| {
+        bad_request(&format!(
+            "The statement's type {name:?} isn't a valid type name."
+        ))
+    })?;
+    let count: i64 = db::query_scalar("SELECT count(*) FROM statement_types WHERE org_id = ?")
+        .bind(org_id)
+        .fetch_one(db)
+        .await
+        .map_err(db_error)?;
+    if count >= MAX_TYPES {
+        return Err(bad_request("At most 500 types."));
+    }
+    db::query("INSERT OR IGNORE INTO statement_types (org_id, name) VALUES (?, ?)")
+        .bind(org_id)
+        .bind(&name)
+        .execute(db)
+        .await
+        .map_err(db_error)?;
+    Ok(canonical_name(db, org_id, &name)
+        .await
+        .map_err(db_error)?
+        .unwrap_or(name))
+}
+
 fn clean_name(raw: &str) -> Result<String, Response> {
     let name = raw.trim();
     if name.is_empty()
@@ -164,7 +195,7 @@ async fn rename_type(
 
 /// The old name, or None if there's no such type in the org.
 async fn rename(db: &Db, org_id: i64, id: i64, name: &str) -> db::Result<Option<String>> {
-    // One batch: rows and rules move to the new name first (matching the old name by
+    // One batch: rows, rules and quick filters move to the new name first (matching the old name by
     // subquery), then the type itself. With no such type, nothing matches and nothing changes.
     let mut batch = db::Batch::new();
     let old = batch.push(
@@ -181,6 +212,18 @@ async fn rename(db: &Db, org_id: i64, id: i64, name: &str) -> db::Result<Option<
          WHERE org_id = ?2 AND type = (SELECT name FROM statement_types WHERE id = ?3 AND org_id = ?2)",
         params![name, org_id, id],
     );
+    // Quick filters keep types in a JSON list: swap the old name in place.
+    batch.push(
+        "UPDATE statement_quick_filters
+         SET types = (SELECT json_group_array(CASE WHEN j.value = (SELECT name FROM statement_types
+                                                                  WHERE id = ?3 AND org_id = ?2)
+                                                   THEN ?1 ELSE j.value END)
+                      FROM json_each(statement_quick_filters.types) j)
+         WHERE org_id = ?2
+           AND EXISTS (SELECT 1 FROM json_each(statement_quick_filters.types) j
+                       WHERE j.value = (SELECT name FROM statement_types WHERE id = ?3 AND org_id = ?2))",
+        params![name, org_id, id],
+    );
     batch.push(
         "UPDATE statement_types SET name = ?1 WHERE id = ?3 AND org_id = ?2",
         params![name, org_id, id],
@@ -192,7 +235,7 @@ async fn rename(db: &Db, org_id: i64, id: i64, name: &str) -> db::Result<Option<
         .and_then(db::Value::into_string))
 }
 
-/// DELETE /api/orgs/{org}/statement-types/{id} — only if no row or rule uses it.
+/// DELETE /api/orgs/{org}/statement-types/{id} — only if no row, rule or quick filter uses it.
 async fn delete_type(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
@@ -204,7 +247,16 @@ async fn delete_type(
         .iter()
         .find(|t| t.id == id)
         .ok_or_else(|| not_found("Type not found."))?;
-    if t.rows > 0 || t.rules > 0 {
+    let filters: i64 = db::query_scalar(
+        "SELECT count(*) FROM statement_quick_filters f, json_each(f.types) j
+         WHERE f.org_id = ? AND j.value = ?",
+    )
+    .bind(org.id)
+    .bind(&t.name)
+    .fetch_one(&state.db)
+    .await
+    .map_err(db_error)?;
+    if t.rows > 0 || t.rules > 0 || filters > 0 {
         let mut uses = Vec::new();
         if t.rows > 0 {
             uses.push(format!(
@@ -218,6 +270,12 @@ async fn delete_type(
                 "{} {}",
                 t.rules,
                 if t.rules == 1 { "rule" } else { "rules" }
+            ));
+        }
+        if filters > 0 {
+            uses.push(format!(
+                "{filters} quick {}",
+                if filters == 1 { "filter" } else { "filters" }
             ));
         }
         return Err(error(
@@ -407,6 +465,41 @@ mod tests {
                 ("rule", "Charges"),
                 ("rule", "Fees")
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_follows_into_quick_filters_in_its_org_only() {
+        let db = db::test_db().await;
+        exec(
+            &db,
+            "INSERT INTO organisations (id, slug, name) VALUES (1, 'a', 'A'), (2, 'b', 'B')",
+        )
+        .await;
+        exec(&db, "INSERT INTO statement_types (id, org_id, name) VALUES (1, 1, 'Fees'), (2, 2, 'Fees'), (3, 1, 'Rent')").await;
+        exec(
+            &db,
+            "INSERT INTO statement_filter_groups (id, org_id, position, name, kind)
+                   VALUES (1, 1, 0, 'G', 'filters'), (2, 2, 0, 'G', 'filters')",
+        )
+        .await;
+        exec(
+            &db,
+            r#"INSERT INTO statement_quick_filters (org_id, group_id, position, name, types)
+                     VALUES (1, 1, 0, 'Both', '["Rent","Fees"]'), (1, 1, 1, 'Rent', '["Rent"]'),
+                            (2, 2, 0, 'Theirs', '["Fees"]')"#,
+        )
+        .await;
+
+        rename(&db, 1, 1, "Charges").await.unwrap();
+        let types: Vec<String> =
+            db::query_scalar("SELECT types FROM statement_quick_filters ORDER BY org_id, position")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            types,
+            [r#"["Rent","Charges"]"#, r#"["Rent"]"#, r#"["Fees"]"#]
         );
     }
 }

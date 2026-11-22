@@ -1,5 +1,5 @@
 //! A bank statement, whatever its format: detect the format from the file's shape, parse it, then give every row
-//! its n8n-compatible id (n8n "Determine Statement Type" -> "Parse ..." -> "Enrich csv (id & unique descriptions)").
+//! its id (`id.rs`). Detection and parsing follow n8n's "Determine Statement Type" -> "Parse ..." nodes.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -8,8 +8,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::hash::{DateFormat, row_id};
-use crate::{sb_csv, sb_pdf_csv};
+use crate::hash::{self, DateFormat};
+use crate::id::{self, ID_LIMIT};
+use crate::{googlesheet_csv, sb_csv, sb_pdf_csv};
 
 /// A statement format this app can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,17 +19,21 @@ pub enum Format {
     SbCsv,
     /// Standard Bank PDF statement, scraped into a CSV by a separate tool (not the PDF itself).
     SbPdfCsv,
+    /// A Google Sheet that n8n (or this app) wrote statement rows to, downloaded as CSV. Not a bank's format: its
+    /// rows already have ids, which are kept.
+    GoogleSheetCsv,
 }
 
 impl Format {
     /// Every known format, in detection order.
-    pub const ALL: [Format; 2] = [Format::SbCsv, Format::SbPdfCsv];
+    pub const ALL: [Format; 3] = [Format::SbCsv, Format::SbPdfCsv, Format::GoogleSheetCsv];
 
     /// The name used in the config and messages.
     pub fn id(self) -> &'static str {
         match self {
             Format::SbCsv => "sb_csv",
             Format::SbPdfCsv => "sb_pdf_csv",
+            Format::GoogleSheetCsv => "googlesheet_csv",
         }
     }
 
@@ -41,6 +46,7 @@ impl Format {
         match self {
             Format::SbCsv => "Standard Bank CSV",
             Format::SbPdfCsv => "Standard Bank PDF, converted to CSV",
+            Format::GoogleSheetCsv => "Google Sheet export (CSV)",
         }
     }
 
@@ -49,6 +55,7 @@ impl Format {
         match self {
             Format::SbCsv => "first cell is \"0\"",
             Format::SbPdfCsv => "header row starts \"description,amount,date\"",
+            Format::GoogleSheetCsv => "header row has id, date, amount and description columns",
         }
     }
 
@@ -56,6 +63,7 @@ impl Format {
         match self {
             Format::SbCsv => sb_csv::matches(rows),
             Format::SbPdfCsv => sb_pdf_csv::matches(rows),
+            Format::GoogleSheetCsv => googlesheet_csv::matches(rows),
         }
     }
 
@@ -63,6 +71,7 @@ impl Format {
         match self {
             Format::SbCsv => sb_csv::parse(rows),
             Format::SbPdfCsv => sb_pdf_csv::parse(rows),
+            Format::GoogleSheetCsv => googlesheet_csv::parse(rows),
         }
     }
 }
@@ -75,16 +84,53 @@ impl fmt::Display for Format {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
-    pub id: i32,
+    /// See `id.rs`: a hash of the date, amount, normalised description and `occurrence`.
+    pub id: i64,
+    /// 0 for the first row of the statement with this key (date, amount, normalised description), 1 for the
+    /// next, and so on. Part of the id; replaces n8n's `_` description suffixes.
+    pub occurrence: u32,
     /// `YYYY-MM-DD`
     pub date: String,
-    /// As the format builds it, plus any `_` suffixes added to make same-day ids unique.
+    /// As the format builds it; never changed to make it unique.
     pub description: String,
-    /// Raw string from the file, never reformatted (it is part of the id).
+    /// As written in the file (the id uses it in cents).
     pub amount: String,
     pub currency: String,
-    /// Goes in the `type` column; set by the category rules (`categories.rs`), if any match.
+    /// Goes in the `type` column: from the file when its format has one (`googlesheet_csv`), otherwise from the
+    /// category rules (`categories.rs`), if any match.
     pub category: Option<String>,
+    /// `YYYY-MM-DD`: the date the row counts towards when it isn't `date` (e.g. a bond repayment on the 1st that
+    /// belongs to the month before). Only `googlesheet_csv` states one; set by hand there.
+    pub effective_date: Option<String>,
+    /// Not from a bank statement: added by hand (a Google Sheet row without an id). Such rows can be deleted
+    /// on their own; a bank statement containing the same transaction later makes it a statement row.
+    pub hand_added: bool,
+}
+
+/// A file that states its rows' ids (`googlesheet_csv`): how those ids compare with the rows. The stated ids are
+/// replaced by computed ones either way; this checks the import. Old sheets hold n8n ids (`hash.rs`), newer ones
+/// this app's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct IdCheck {
+    /// Already this app's id for the row.
+    pub current: usize,
+    /// The n8n id of the row exactly as written.
+    pub n8n_matched: usize,
+    /// The n8n id of the row with its amount written another way (`-1798` shown as `-1,798.00`): the sheet
+    /// reformatted the number after n8n hashed it.
+    pub n8n_reformatted: usize,
+    /// Neither: the row was edited after its id was made (e.g. a duplicate charge zeroed by hand).
+    pub mismatched: Vec<IdMismatch>,
+    /// 1-based lines with a blank id (rows added by hand).
+    pub no_id: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct IdMismatch {
+    /// 1-based line in the file.
+    pub line: usize,
+    /// As stated in the file.
+    pub id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +140,8 @@ pub struct Statement {
     /// from configuration or the user.
     pub account_number: Option<String>,
     pub transactions: Vec<Transaction>,
+    /// Formats whose rows state their ids: how they compare with the rows.
+    pub id_check: Option<IdCheck>,
 }
 
 /// What a format parser returns: transactions without ids yet.
@@ -101,15 +149,27 @@ pub struct Statement {
 pub struct Parsed {
     pub account_number: Option<String>,
     pub transactions: Vec<Transaction>,
+    /// Formats whose rows state their ids: what each row stated, one per transaction.
+    pub stated_ids: Option<Vec<StatedId>>,
 }
 
-pub fn parse_file(path: &Path, date_format: DateFormat) -> Result<Statement> {
+/// A row's id as the file states it, with what's needed to check it.
+#[derive(Debug)]
+pub struct StatedId {
+    /// 1-based line in the file.
+    pub line: usize,
+    pub id: Option<i64>,
+    /// The description as written, with any n8n `_` suffix (part of an n8n id).
+    pub description: String,
+}
+
+pub fn parse_file(path: &Path) -> Result<Statement> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    parse(file, date_format).with_context(|| format!("reading statement {}", path.display()))
+    parse(file).with_context(|| format!("reading statement {}", path.display()))
 }
 
 /// Detects the format, parses the rows and assigns ids. Cells are used exactly as read: no trimming.
-pub fn parse<R: Read>(reader: R, date_format: DateFormat) -> Result<Statement> {
+pub fn parse<R: Read>(reader: R) -> Result<Statement> {
     let rows = read_rows(reader)?;
     let Some(format) = detect(&rows) else {
         let known: Vec<String> = Format::ALL
@@ -124,14 +184,17 @@ pub fn parse<R: Read>(reader: R, date_format: DateFormat) -> Result<Statement> {
     let Parsed {
         account_number,
         mut transactions,
+        stated_ids,
     } = format
         .parse(&rows)
         .with_context(|| format!("parsing {format}"))?;
-    assign_unique_ids(&mut transactions, date_format);
+    assign_ids(&mut transactions)?;
+    let id_check = stated_ids.map(|stated| googlesheet_csv::check_ids(&stated, &transactions));
     Ok(Statement {
         format,
         account_number,
         transactions,
+        id_check,
     })
 }
 
@@ -152,20 +215,62 @@ fn read_rows<R: Read>(reader: R) -> Result<Vec<csv::StringRecord>> {
         .context("reading CSV")
 }
 
-/// n8n `uniqDescriptionsByDay` + `getRowId`: within each day, append `_` to the description until the id is
-/// unique, then use that id. Days are independent, so processing in file order gives the same result.
-fn assign_unique_ids(transactions: &mut [Transaction], date_format: DateFormat) {
-    let mut ids_by_day: HashMap<String, HashSet<i32>> = HashMap::new();
+/// Gives every transaction its occurrence and id (`id.rs`). Refuses an amount that isn't a number of cents.
+fn assign_ids(transactions: &mut [Transaction]) -> Result<()> {
+    let mut occurrences: HashMap<(String, i64, String), u32> = HashMap::new();
+    let mut ids = HashSet::new();
     for t in transactions {
-        let seen = ids_by_day.entry(t.date.clone()).or_default();
-        let mut id = row_id(&t.date, &t.description, &t.amount, date_format);
-        while seen.contains(&id) {
-            t.description.push('_');
-            id = row_id(&t.date, &t.description, &t.amount, date_format);
-        }
-        seen.insert(id);
-        t.id = id;
+        let cents = id::amount_cents(&t.amount)
+            .with_context(|| format!("{} {:?}", t.date, t.description))?;
+        let description = id::key_description(&t.description);
+        let n = occurrences
+            .entry((t.date.clone(), cents, description.clone()))
+            .or_default();
+        t.occurrence = *n;
+        *n += 1;
+        t.id = id::row_id(&t.date, cents, &description, t.occurrence);
+        debug_assert!((0..ID_LIMIT).contains(&t.id));
+        // Different keys with the same 48-bit id: never expected, but two rows must never become one.
+        ensure!(
+            ids.insert(t.id),
+            "two different rows got the same id ({} {:?}); please report this",
+            t.date,
+            t.description
+        );
     }
+    Ok(())
+}
+
+/// The ids n8n gave these transactions, with the descriptions it wrote: n8n `uniqDescriptionsByDay` +
+/// `getRowId`, which append `_` to the description until the id is unique that day. For checking the parsers
+/// against n8n's output.
+pub fn n8n_ids(transactions: &[Transaction]) -> Vec<(i32, String)> {
+    let mut ids_by_day: HashMap<&str, HashSet<i32>> = HashMap::new();
+    transactions
+        .iter()
+        .map(|t| {
+            let seen = ids_by_day.entry(&t.date).or_default();
+            let mut description = t.description.clone();
+            let id_of = |d: &str| hash::row_id(&t.date, d, &t.amount, DateFormat::UtcTimestamp);
+            let mut n8n_id = id_of(&description);
+            while seen.contains(&n8n_id) {
+                description.push('_');
+                n8n_id = id_of(&description);
+            }
+            seen.insert(n8n_id);
+            (n8n_id, description)
+        })
+        .collect()
+}
+
+/// `YYYY-MM-DD`, checked to be a real date.
+pub fn check_iso_date(date: &str) -> Result<String> {
+    let b = date.as_bytes();
+    ensure!(
+        b.len() == 10 && b[4] == b'-' && b[7] == b'-',
+        "expected YYYY-MM-DD"
+    );
+    to_iso_date(&format!("{}{}{}", &date[0..4], &date[5..7], &date[8..10]))
 }
 
 /// `YYYYMMDD` -> `YYYY-MM-DD`. JS `new Date(y, m, d)` silently rolls invalid dates over (Feb 31 -> Mar 3);
@@ -196,23 +301,16 @@ mod tests {
 
     #[test]
     fn detects_standard_bank_csv() {
-        let s = parse(
-            &include_bytes!("../tests/fixtures/sb_csv_synthetic.csv")[..],
-            DateFormat::UtcTimestamp,
-        )
-        .unwrap();
+        let s = parse(&include_bytes!("../tests/fixtures/sb_csv_synthetic.csv")[..]).unwrap();
         assert_eq!(s.format, Format::SbCsv);
         assert_eq!(s.account_number.as_deref(), Some("123456789"));
     }
 
     #[test]
     fn unrecognised_file_lists_known_formats() {
-        let err = parse(
-            "Type,Product,Started Date\n".as_bytes(),
-            DateFormat::UtcTimestamp,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = parse("Type,Product,Started Date\n".as_bytes())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unrecognised statement format"), "{err}");
         assert!(
             err.contains("Standard Bank CSV (sb_csv): first cell is \"0\""),
@@ -222,21 +320,49 @@ mod tests {
 
     #[test]
     fn empty_file_is_unrecognised() {
-        let err = parse("".as_bytes(), DateFormat::UtcTimestamp).unwrap_err();
+        let err = parse("".as_bytes()).unwrap_err();
         assert!(err.to_string().contains("unrecognised"), "{err}");
     }
 
+    const DUPLICATES: &str = "0,5009,BRANCH,0,,X,0,0\n,123,ACC-NO,0,,,0,0\n,0,OPEN,1,OPEN BALANCE,,0,0\n\
+        HIST,20260101,,-5,FEE,,1,0\nHIST,20260101,,-5,FEE,,1,0\nHIST,20260101,,-5.00,FEE  ##,,1,0\n\
+        HIST,20260102,,-5,FEE,,1,0\n,0,CLOSE,1,CLOSE BALANCE,,0,0";
+
     #[test]
-    fn same_day_duplicates_get_underscore_suffix() {
-        let csv = "0,5009,BRANCH,0,,X,0,0\n,123,ACC-NO,0,,,0,0\n,0,OPEN,1,OPEN BALANCE,,0,0\n\
-                   HIST,20260101,,-5,FEE,,1,0\nHIST,20260101,,-5,FEE,,1,0\nHIST,20260101,,-5,FEE,,1,0\n\
-                   HIST,20260102,,-5,FEE,,1,0\n,0,CLOSE,1,CLOSE BALANCE,,0,0";
-        let s = parse(csv.as_bytes(), DateFormat::UtcTimestamp).unwrap();
-        let descs: Vec<&str> = s
+    fn same_key_rows_are_counted_not_renamed() {
+        let s = parse(DUPLICATES.as_bytes()).unwrap();
+        let rows: Vec<(&str, u32)> = s
             .transactions
             .iter()
-            .map(|t| t.description.as_str())
+            .map(|t| (t.description.as_str(), t.occurrence))
             .collect();
-        assert_eq!(descs, ["FEE ", "FEE _", "FEE __", "FEE "]);
+        // The third row differs only in formatting, so it's the same key.
+        assert_eq!(
+            rows,
+            [("FEE ", 0), ("FEE ", 1), ("FEE  ## ", 2), ("FEE ", 0)]
+        );
+        let ids: HashSet<i64> = s.transactions.iter().map(|t| t.id).collect();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(
+            s.transactions[0].id,
+            id::row_id("2026-01-01", -500, "FEE", 0)
+        );
+    }
+
+    #[test]
+    fn n8n_ids_add_underscores_per_day() {
+        let s = parse(DUPLICATES.as_bytes()).unwrap();
+        let descs: Vec<String> = n8n_ids(&s.transactions)
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(descs, ["FEE ", "FEE _", "FEE  ## ", "FEE "]);
+    }
+
+    #[test]
+    fn unreadable_amounts_are_refused() {
+        let csv = DUPLICATES.replace("-5.00", "R5");
+        let err = format!("{:#}", parse(csv.as_bytes()).unwrap_err());
+        assert!(err.contains("amount \"R5\" isn't a number"), "{err}");
     }
 }

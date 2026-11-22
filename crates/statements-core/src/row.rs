@@ -16,7 +16,7 @@ pub enum Column {
     Currency,
     /// Category. Left blank in the POC.
     Type,
-    /// Always blank (n8n writes `null`).
+    /// Blank unless the row has one (n8n writes `null`; it's set by hand in the sheet).
     EffectiveDate,
 }
 
@@ -47,7 +47,7 @@ impl Column {
     }
 
     /// Matches a header cell by exact name, ignoring surrounding whitespace.
-    fn from_header(header: &str) -> Option<Column> {
+    pub(crate) fn from_header(header: &str) -> Option<Column> {
         let header = header.trim();
         Self::DEFAULT_ORDER
             .into_iter()
@@ -65,7 +65,7 @@ impl Column {
             Column::Description => t.description.clone(),
             Column::Currency => t.currency.clone(),
             Column::Type => t.category.clone().unwrap_or_default(),
-            Column::EffectiveDate => String::new(),
+            Column::EffectiveDate => t.effective_date.clone().unwrap_or_default(),
         }
     }
 
@@ -74,13 +74,17 @@ impl Column {
     /// raw amount, which is part of the id, is unchanged.
     pub fn cell(self, t: &Transaction) -> Cell {
         match self {
-            Column::Id => Cell::Integer(i64::from(t.id)),
+            Column::Id => Cell::Integer(t.id),
             Column::Amount => t
                 .amount
                 .replace(',', "")
                 .parse::<f64>()
                 .map_or_else(|_| Cell::Text(t.amount.clone()), Cell::Decimal),
             Column::Date => Cell::Date(t.date.clone()),
+            Column::EffectiveDate => t
+                .effective_date
+                .clone()
+                .map_or_else(|| Cell::Text(String::new()), Cell::Date),
             other => Cell::Text(other.value(t)),
         }
     }
@@ -206,11 +210,14 @@ mod tests {
     fn tx() -> Transaction {
         Transaction {
             id: -1575916464,
+            occurrence: 0,
             date: "2026-05-30".into(),
             description: "OVERDRAFT SERVICE FEE ".into(),
             amount: "-57.5".into(),
             currency: "ZAR".into(),
             category: None,
+            effective_date: None,
+            hand_added: false,
         }
     }
 
