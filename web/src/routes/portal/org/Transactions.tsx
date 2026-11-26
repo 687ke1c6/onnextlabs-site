@@ -43,9 +43,9 @@ import { type AccountState, StatementsShell } from "~/routes/portal/org/Statemen
 type Meta = GridColumnMeta<OrgTransaction>;
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/** `Feb 2026` -> `2026-02`, to put labels in date order. */
 /** `2026-02-28` -> `Feb 2026`, as the server labels months. */
 const monthLabel = (iso: string) => `${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}`;
+/** `Feb 2026` -> `2026-02`, to put labels in date order. */
 const monthKey = (label: string) => `${label.slice(-4)}-${String(MONTHS.indexOf(label.slice(0, 3)) + 1).padStart(2, "0")}`;
 
 /** Months newest first (in date order, not alphabetically). */
@@ -78,18 +78,9 @@ const balanceColumn = (balances: () => Map<number, number>): ColumnDef<OrgTransa
 const columnsFor = (balances: (() => Map<number, number>) | null): ColumnDef<OrgTransaction, any>[] =>
   allColumns.flatMap((c) => (c === BALANCE_SLOT ? (balances ? [balanceColumn(balances)] : []) : [c]));
 
-// Order, Month and balances always go by the transaction date, as the bank's statement does, so
-// the balance matches it. Effective dates only change what quick filters pick.
+// Order and balances always go by the transaction date, as the bank's statement does, so the balance
+// matches it. Month is always the applied date's: the effective date if there is one, else the date.
 const allColumns: (ColumnDef<OrgTransaction, any> | typeof BALANCE_SLOT)[] = [
-  {
-    accessorKey: "month",
-    header: "Month",
-    cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{c.getValue<string>()}</span>,
-    // Chronological, not alphabetical.
-    sortingFn: (a, b) => monthKey(a.original.month).localeCompare(monthKey(b.original.month)),
-    filterFn: pickFilter,
-    meta: { width: "w-32", pick: { options: monthOptions } } satisfies Meta,
-  },
   {
     accessorKey: "date",
     header: "Date",
@@ -109,6 +100,15 @@ const allColumns: (ColumnDef<OrgTransaction, any> | typeof BALANCE_SLOT)[] = [
       </Show>
     ),
     meta: { width: "w-32", label: "Effective date" } satisfies Meta,
+  },
+  {
+    accessorKey: "month",
+    header: "Month",
+    cell: (c) => <span class="whitespace-nowrap text-muted-foreground">{c.getValue<string>()}</span>,
+    // Chronological, not alphabetical.
+    sortingFn: (a, b) => monthKey(a.original.month).localeCompare(monthKey(b.original.month)),
+    filterFn: pickFilter,
+    meta: { width: "w-32", pick: { options: monthOptions } } satisfies Meta,
   },
   {
     accessorKey: "description",
@@ -508,7 +508,7 @@ function TransactionsView(props: { acct: AccountState }) {
     return data && a && data.account === a.id ? data : undefined;
   };
   const error = () => rows.error ?? props.acct.accounts.error;
-  // Which date quick filters and Month go by (shared with printing). Order, shading and balances never change with it.
+  // Which date quick filters go by (shared with printing). Order, shading, Month and balances never change with it.
   const [basis, setBasis] = dateBasis(org.slug);
   // The account's opening balance, if it has one: the grid then offers a running Balance column.
   const opening = createMemo(
@@ -558,14 +558,8 @@ function TransactionsView(props: { acct: AccountState }) {
   };
   // Oldest first (the server sends newest first): the grid's order when nothing is sorted, and
   // its tie-break when a sort leaves rows equal, so the Balance column reads top to bottom.
-  // Order stays by transaction date; with effective dates on, a row's Month (and so the Month filter) is its
-  // effective date's.
-  const ledgerRows = createMemo(() => {
-    const rows = [...(current()?.rows ?? [])].sort(ledgerOrder("transaction"));
-    return basis() === "effective"
-      ? rows.map((r) => (r.effective_date ? { ...r, month: monthLabel(r.effective_date) } : r))
-      : rows;
-  });
+  // Order stays by transaction date, whatever the basis.
+  const ledgerRows = createMemo(() => [...(current()?.rows ?? [])].sort(ledgerOrder("transaction")));
   const shownRows = createMemo(() => applyChips(ledgerRows(), chipGroups(), active(), basis()));
 
   // Printing: exactly what the grid shows, with the quick filters and grid filters in words.
@@ -596,9 +590,16 @@ function TransactionsView(props: { acct: AccountState }) {
       : null;
     setPrintJob({ account, rows: view.rows, selection: [...quick, ...view.filters], period: period?.from && period.to ? period : null });
   };
-  /** Updates one row in place (the grid keeps its filters, sorting and page). */
+  /** Updates one row in place (the grid keeps its filters, sorting and page). Month follows the effective date. */
   const patchRow = (id: number, patch: Partial<OrgTransaction>) =>
-    mutate((d) => d && { ...d, rows: d.rows.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
+    mutate((d) => d && {
+      ...d,
+      rows: d.rows.map((r) => {
+        if (r.id !== id) return r;
+        const next = { ...r, ...patch };
+        return { ...next, month: monthLabel(next.effective_date ?? next.date) };
+      }),
+    });
   // The row whose details are open in the side panel.
   const [openRow, setOpenRow] = createSignal<number | null>(null);
   // Rows selected by dragging in the grid, and whether the panel for them is open (instead of one row's).
@@ -689,8 +690,8 @@ function TransactionsView(props: { acct: AccountState }) {
                     label="Effective dates"
                     hint={
                       basis() === "effective"
-                        ? "On: date quick filters, the Month column (and its filter) and printing count a row with an effective date on that day. Order, shading and balances stay by transaction date. Click to use transaction dates."
-                        : "Off: date quick filters, the Month column and printing go by transaction date. Click to count a row with an effective date on that day instead. Order, shading and balances stay by transaction date."
+                        ? "On: date quick filters and printing count a row with an effective date on that day. Order, shading and balances stay by transaction date; Month always shows the effective date's month. Click to use transaction dates."
+                        : "Off: date quick filters and printing go by transaction date. Click to count a row with an effective date on that day instead. Order, shading and balances stay by transaction date; Month always shows the effective date's month."
                     }
                     icon={CalendarClock}
                     on={basis() === "effective"}
@@ -719,7 +720,7 @@ function TransactionsView(props: { acct: AccountState }) {
                     : undefined
                 }
                 isSelected={(r) => r.id === openRow()}
-                // Shading always follows the transaction month (as the order does), whatever Month shows.
+                // Shading always follows the transaction month (as the order does), not Month.
                 bandBy={(r) => r.date.slice(0, 7)}
               />
             </RowEditingContext.Provider>

@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use statements_core::{
     categories::{categorise, CategoryRule},
-    row::month_label,
+    row::applied_month,
     statement::{self, Format, IdCheck, Statement, Transaction},
 };
 
@@ -1024,7 +1024,8 @@ struct OrgTransaction {
     txn_id: i64,
     account_id: i64,
     date: String,
-    /// e.g. "Aug 2024", derived from `date` exactly as the sheet's `month` column is.
+    /// e.g. "Aug 2024": the month of `effective_date` if set, else of `date`, exactly as the sheet's
+    /// `month` column is.
     #[serde(skip_deserializing)]
     month: String,
     amount: String,
@@ -1091,7 +1092,7 @@ async fn org_transactions(
     .await
     .map(|mut rows: Vec<OrgTransaction>| {
         for r in &mut rows {
-            r.month = month_label(&r.date);
+            r.month = applied_month(&r.date, r.effective_date.as_deref());
         }
         rows
     })

@@ -1,5 +1,5 @@
 //! A Google Sheet of statement rows, downloaded as CSV: the tab n8n (and this app's "Send to Google Sheets")
-//! appends to, `id, month, date, effective_date, amount, description, currency, type` (`row.rs`). Not a bank's
+//! appends to, `id, date, effective_date, month, amount, description, currency, type` (`row.rs`). Not a bank's
 //! format, so the file doesn't state an account number.
 //!
 //! Rows get this app's ids like any statement's (`id.rs`); the sheet's own ids are only checked, in an

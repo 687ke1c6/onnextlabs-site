@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use statements_core::row::month_label;
+use statements_core::row::applied_month;
 
 use crate::{
     api::{bad_request, db_error, not_found},
@@ -174,7 +174,7 @@ pub(crate) async fn detail(state: &AppState, org: &Org, id: i64) -> Result<RowDe
         d.missing = !documents::file_exists(state, org, &d.folder, &d.filename).await;
     }
     Ok(RowDetail {
-        month: month_label(&row.date),
+        month: applied_month(&row.date, row.effective_date.as_deref()),
         row,
         uploads,
         documents,

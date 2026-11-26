@@ -1,5 +1,5 @@
 //! Shapes parsed transactions into sheet rows, matching the n8n "Enrich csv" output
-//! (`id, month, date, effective_date, amount, description, currency, type`).
+//! (`id, date, effective_date, month, amount, description, currency, type`).
 
 use anyhow::{Result, ensure};
 
@@ -24,9 +24,9 @@ impl Column {
     /// Header order used when writing to an empty tab.
     pub const DEFAULT_ORDER: [Column; 8] = [
         Column::Id,
-        Column::Month,
         Column::Date,
         Column::EffectiveDate,
+        Column::Month,
         Column::Amount,
         Column::Description,
         Column::Currency,
@@ -59,7 +59,7 @@ impl Column {
     pub fn value(self, t: &Transaction) -> String {
         match self {
             Column::Id => t.id.to_string(),
-            Column::Month => month_label(&t.date),
+            Column::Month => applied_month(&t.date, t.effective_date.as_deref()),
             Column::Date => t.date.clone(),
             Column::Amount => t.amount.clone(),
             Column::Description => t.description.clone(),
@@ -192,6 +192,11 @@ impl Layout {
     }
 }
 
+/// The month a row counts towards: its effective date's when it has one, else its date's.
+pub fn applied_month(date: &str, effective_date: Option<&str>) -> String {
+    month_label(effective_date.unwrap_or(date))
+}
+
 /// `YYYY-MM-DD` -> en-US short month and year, e.g. `May 2026` (n8n: `toLocaleDateString('en-US',
 /// { month: 'short', year: 'numeric' })`). The date comes from the parser, so it is always well formed.
 pub fn month_label(date: &str) -> String {
@@ -229,9 +234,9 @@ mod tests {
             serde_json::Value::Array(json),
             serde_json::json!([
                 -1575916464,
-                "'May 2026",
                 "2026-05-30",
                 "",
+                "'May 2026",
                 -57.5,
                 "'OVERDRAFT SERVICE FEE ",
                 "'ZAR",
@@ -269,15 +274,23 @@ mod tests {
     }
 
     #[test]
+    fn month_follows_the_effective_date_when_there_is_one() {
+        let mut t = tx();
+        assert_eq!(Column::Month.value(&t), "May 2026");
+        t.effective_date = Some("2026-04-30".into());
+        assert_eq!(Column::Month.value(&t), "Apr 2026");
+    }
+
+    #[test]
     fn default_layout_matches_prod_sheet_order() {
         let layout = Layout::default_headers();
         assert_eq!(
             layout.headers(),
             [
                 "id",
-                "month",
                 "date",
                 "effective_date",
+                "month",
                 "amount",
                 "description",
                 "currency",
@@ -288,9 +301,9 @@ mod tests {
             layout.row(&tx()),
             [
                 "-1575916464",
-                "May 2026",
                 "2026-05-30",
                 "",
+                "May 2026",
                 "-57.5",
                 "OVERDRAFT SERVICE FEE ",
                 "ZAR",

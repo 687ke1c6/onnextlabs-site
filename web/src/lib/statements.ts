@@ -343,7 +343,7 @@ export type OrgTransaction = Transaction & {
   hand_added: boolean;
   /** Documents attached to the row. */
   attachments: number;
-  /** e.g. "Aug 2024": derived from `date`, as in the sheet's `month` column. */
+  /** e.g. "Aug 2024": from `effective_date` if set, else `date`, as in the sheet's `month` column. */
   month: string;
   updated_at: string;
   upload_id: number | null;
@@ -662,8 +662,8 @@ const basisKey = (org: string) => `statement-date-basis:${org}`;
 const bases = new Map<string, Signal<DateBasis>>();
 
 /**
- * Which date counts for the org's statement rows in this browser, shared by the grid (quick
- * filters, sorting, Month, balances) and printing: the transaction date, or the effective date
+ * Which date counts for the org's statement rows in this browser, shared by the grid's quick
+ * filters and printing: the transaction date, or the effective date
  * where a row has one. Remembered per org.
  */
 export function dateBasis(org: string): [Accessor<DateBasis>, (b: DateBasis) => void] {
