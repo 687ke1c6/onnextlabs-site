@@ -449,7 +449,7 @@ export function Coverage(props: {
               {(e) => (
                 <p class="text-foreground">
                   {e().first
-                    ? "The first statement in this account."
+                    ? "The first statement in this bank account."
                     : [
                         e().fills > 0 && `Fills ${dayCount(e().fills)} of gaps`,
                         e().extends > 0 && `adds ${dayCount(e().extends)} before or after what's saved`,

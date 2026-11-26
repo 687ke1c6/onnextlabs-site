@@ -6,7 +6,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { can } from "~/lib/orgs";
 import { pickAccount, pickedAccount } from "~/lib/statementAccount";
-import { type Account, createAccount, fetchAccounts, updateAccount } from "~/lib/statements";
+import { type Account, type AccountDetails, createAccount, fetchAccounts, formatCents, updateAccount } from "~/lib/statements";
 import { selectValue, settled } from "~/lib/utils";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 import { StatementsTabs } from "~/routes/portal/org/StatementParts";
@@ -39,7 +39,10 @@ export function useStatementAccount() {
 
 export type AccountState = ReturnType<typeof useStatementAccount>;
 
-/** Name (required) and identifier (optional), for creating or editing an account. */
+/**
+ * Name (required) and identifier (optional), for creating or editing an account, and what
+ * statement PDFs show about it: holder, product and a starting balance.
+ */
 function AccountForm(props: {
   account?: Account;
   submitLabel: string;
@@ -49,6 +52,14 @@ function AccountForm(props: {
   const org = useOrg();
   const [name, setName] = createSignal(props.account?.name ?? "");
   const [identifier, setIdentifier] = createSignal(props.account?.identifier ?? "");
+  const a = props.account;
+  const [details, setDetails] = createSignal<AccountDetails>({
+    holder_name: a?.holder_name ?? "",
+    product_name: a?.product_name ?? "",
+    opening_balance: a?.opening_balance_cents != null ? formatCents(a.opening_balance_cents) : "",
+    opening_balance_date: a?.opening_balance_date ?? "",
+  });
+  const setDetail = (key: keyof AccountDetails, value: string) => setDetails({ ...details(), [key]: value });
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -59,11 +70,11 @@ function AccountForm(props: {
     setError(null);
     try {
       const saved = props.account
-        ? await updateAccount(org.slug, props.account.id, name(), identifier())
-        : await createAccount(org.slug, name(), identifier());
+        ? await updateAccount(org.slug, props.account.id, name(), identifier(), details())
+        : await createAccount(org.slug, name(), identifier(), details());
       props.onSaved(saved);
     } catch (err) {
-      setError(errorText(err, "Couldn't save the account."));
+      setError(errorText(err, "Couldn't save the bank account."));
     } finally {
       setBusy(false);
     }
@@ -100,6 +111,41 @@ function AccountForm(props: {
         The identifier is usually the bank account number. When a statement states its account number, it's checked against this
         before saving.
       </p>
+
+      <fieldset class="flex flex-col gap-3 border-t border-border pt-4">
+        <legend class="sr-only">Statement details</legend>
+        <p class="text-xs text-muted-foreground">
+          For printed statements (all optional). Templates show them with variables like <code>{"{account.holder}"}</code>.
+        </p>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label class="flex flex-col gap-1.5 text-sm">
+            <span class="text-muted-foreground">Account holder</span>
+            <Input value={details().holder_name} onInput={(e) => setDetail("holder_name", e.currentTarget.value)} maxLength={100} placeholder="e.g. Mr J Smith" />
+          </label>
+          <label class="flex flex-col gap-1.5 text-sm">
+            <span class="text-muted-foreground">Product name</span>
+            <Input value={details().product_name} onInput={(e) => setDetail("product_name", e.currentTarget.value)} maxLength={100} placeholder="e.g. Current Account" />
+          </label>
+          <label class="flex flex-col gap-1.5 text-sm">
+            <span class="text-muted-foreground">Starting balance</span>
+            <Input
+              value={details().opening_balance}
+              onInput={(e) => setDetail("opening_balance", e.currentTarget.value)}
+              inputMode="decimal"
+              autocomplete="off"
+              placeholder="e.g. 40957.20"
+            />
+          </label>
+          <label class="flex flex-col gap-1.5 text-sm">
+            <span class="text-muted-foreground">At the start of</span>
+            <Input type="date" value={details().opening_balance_date} onInput={(e) => setDetail("opening_balance_date", e.currentTarget.value)} />
+          </label>
+        </div>
+        <p class="text-xs text-muted-foreground">
+          Statement balances are worked out from this and every row of the bank account, by transaction date, before or after this day.
+          Filters never change them.
+        </p>
+      </fieldset>
       <Show when={error()}>
         <p role="alert" class="text-sm text-red-500">{error()}</p>
       </Show>
@@ -147,7 +193,7 @@ export function AccountDialog(props: {
       <div class="flex flex-col gap-4 p-6">
         <div class="flex items-start justify-between gap-4">
           <h2 id="account-title" class="text-lg font-semibold tracking-tight">
-            {props.account ? `Edit ${props.account.name}` : "New account"}
+            {props.account ? `Edit ${props.account.name}` : "New bank account"}
           </h2>
           <button
             type="button"
@@ -190,7 +236,7 @@ function AccountPicker(props: { state: AccountState; onNew: () => void }) {
         });
         return (
           <label class="flex items-center gap-2 text-sm">
-            <span class="text-muted-foreground">Account</span>
+            <span class="text-muted-foreground">Bank account</span>
             <select
               ref={select}
               value={selectValue(String(current().id), list())}
@@ -204,12 +250,12 @@ function AccountPicker(props: { state: AccountState; onNew: () => void }) {
                 }
               }}
               class="h-9 min-w-[12rem] rounded-md border border-input bg-background px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              aria-label="Account"
+              aria-label="Bank account"
             >
               <For each={list()}>{(a) => <option value={String(a.id)}>{a.name}</option>}</For>
               <Show when={can(org, "write-statements")}>
                 <option disabled>──────────</option>
-                <option value={NEW_ACCOUNT}>New account…</option>
+                <option value={NEW_ACCOUNT}>New bank account…</option>
               </Show>
             </select>
           </label>
@@ -229,17 +275,17 @@ function FirstAccount(props: { state: AccountState }) {
           <Landmark size={20} />
         </div>
         <div>
-          <h2 class="text-base font-medium">Create your first account</h2>
-          <p class="text-sm text-muted-foreground">Statements are uploaded into an account, so start with one.</p>
+          <h2 class="text-base font-medium">Create your first bank account</h2>
+          <p class="text-sm text-muted-foreground">Statements are uploaded into a bank account, so start with one.</p>
         </div>
       </div>
       <Show
         when={can(org, "write-statements")}
-        fallback={<p class="mt-4 text-sm text-muted-foreground">Ask someone who can upload statements to create an account.</p>}
+        fallback={<p class="mt-4 text-sm text-muted-foreground">Ask someone who can upload statements to create a bank account.</p>}
       >
         <div class="mt-5">
           <AccountForm
-            submitLabel="Create account"
+            submitLabel="Create bank account"
             onSaved={(a) => {
               props.state.pick(a.id);
               props.state.reload();
@@ -275,7 +321,7 @@ export function StatementsShell(props: {
       <header class="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-4">
         <div class="min-w-0">
           <p class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Statements</p>
-          <Show when={state.account()} fallback={<h1 class="truncate text-2xl font-semibold tracking-tight">Accounts</h1>}>
+          <Show when={state.account()} fallback={<h1 class="truncate text-2xl font-semibold tracking-tight">Bank accounts</h1>}>
             {(a) => (
               <>
                 <h1 class="truncate text-2xl font-semibold tracking-tight">{a().name}</h1>

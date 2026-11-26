@@ -2,6 +2,10 @@
   "name": "onnextlabs-site",
   "build": { "dockerfile": "Dockerfile" },
   "forwardPorts": [3000, 5173],
+  "mounts": [
+    "source=${localEnv:HOME}/code/statements-iq/references/n8n,target=/workspaces/n8n-reference,type=bind,readonly",
+    "source=${localEnv:HOME}/code/pdf-sign,target=/workspaces/pdf-sign,type=bind,readonly"
+  ],
   "portsAttributes": {
     "3000": { "label": "axum" },
     "5173": { "label": "vite" }

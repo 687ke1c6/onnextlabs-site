@@ -6,6 +6,7 @@ export type Permission =
   | "write-docs"
   | "read-statements"
   | "write-statements"
+  | "delete-statement-rows"
   | "manage-orgs"
   | "write-roles";
 

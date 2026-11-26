@@ -164,9 +164,9 @@ function FiltersEditor() {
   return (
     <div class="mt-6 flex flex-col gap-4">
       <p class="max-w-3xl text-sm text-muted-foreground">
-        Quick filters appear as toggles above the statement grid, for every account. Toggled filters in the same group show rows matching
-        any of them; toggled filters in different groups show rows matching all the groups. Dates are compared with a row's effective
-        date, or its date when it has none.
+        Quick filters appear as toggles above the statement grid, for every bank account. Toggled filters in the same group show rows matching
+        any of them; toggled filters in different groups show rows matching all the groups. Dates are compared with a row's transaction
+        date, or with its effective date where it has one when the grid's Effective dates switch is on.
       </p>
 
       <Show when={loaded.error}>
@@ -427,7 +427,7 @@ function FilterCard(props: {
 
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
         <div class="flex flex-col gap-1">
-          <span class="text-xs text-muted-foreground">Type is any of</span>
+          <span class="text-xs text-muted-foreground">Category is any of</span>
           <div class="flex min-h-9 flex-wrap items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1">
             <For each={f().types}>
               {(t) => (
@@ -450,14 +450,14 @@ function FilterCard(props: {
               <select
                 class="h-7 min-w-0 flex-1 bg-transparent text-xs text-muted-foreground focus:outline-none"
                 value=""
-                aria-label="Add a type"
+                aria-label="Add a category"
                 onChange={(e) => {
                   const t = e.currentTarget.value;
                   e.currentTarget.value = "";
                   if (t && !f().types.includes(t)) props.onChange({ types: [...f().types, t] });
                 }}
               >
-                <option value="">{f().types.length ? "Add another…" : "Any type (add one…)"}</option>
+                <option value="">{f().types.length ? "Add another…" : "Any category (add one…)"}</option>
                 <For each={props.types.filter((t) => !f().types.includes(t))}>{(t) => <option value={t}>{t}</option>}</For>
               </select>
             </Show>

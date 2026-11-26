@@ -10,8 +10,11 @@
 //! removes the split. A split's rows can't themselves be split.
 //!
 //! Rows added by hand (`hand_added`: split rows, and Google Sheet rows without an id) can be
-//! deleted on their own; rows from bank statements go only with their statement. A split row is
-//! removed by changing its split, so a split always adds up to zero.
+//! deleted on their own with `write-statements`. Rows from bank statements can be deleted too,
+//! with `delete-statement-rows`; uploading a statement containing one again brings it back,
+//! unless an upload exclusion (`statement_exclusions`) leaves it out. Deleting a row takes its
+//! split with it. A split row is removed by changing its split, so a split always adds up to
+//! zero.
 //!
 //! Needs `write-statements`.
 
@@ -31,7 +34,7 @@ use axum::{
 use serde::Deserialize;
 use statements_core::{
     id::{amount_cents, format_cents, split_row_id},
-    statement::check_iso_date,
+    statement::{check_effective_date, check_iso_date},
 };
 
 use crate::{
@@ -82,6 +85,7 @@ struct SplitBody {
 enum SplitError {
     NotFound,
     Invalid(String),
+    Forbidden(&'static str),
     Db(db::Error),
 }
 
@@ -96,6 +100,7 @@ impl From<SplitError> for Response {
         match e {
             SplitError::NotFound => not_found("Row not found."),
             SplitError::Invalid(msg) => bad_request(&msg),
+            SplitError::Forbidden(msg) => crate::api::error(StatusCode::FORBIDDEN, msg),
             SplitError::Db(e) => db_error(e),
         }
     }
@@ -263,9 +268,9 @@ async fn check_rows(
         };
         let effective_date = match r.effective_date.as_deref().map(str::trim) {
             None | Some("") => None,
-            Some(d) => match check_iso_date(d) {
+            Some(d) => match check_effective_date(&date, d) {
                 Ok(d) => Some(d),
-                Err(_) => return invalid(format!("Row {n}: the effective date isn't a date.")),
+                Err(e) => return invalid(format!("Row {n}: the effective date isn't right: {e}.")),
             },
         };
         let description = r.description.trim().to_string();
@@ -325,21 +330,34 @@ struct DeletableRow {
     split_of: Option<i64>,
 }
 
-/// DELETE /api/orgs/{org}/statement-transactions/{id} — delete a row added by hand, with its
-/// split's rows if it has a split. (Routed by `statement_rows`, with the row's other endpoints.)
+/// DELETE /api/orgs/{org}/statement-transactions/{id} — delete a row, with its split's rows if
+/// it has a split: one added by hand needs `write-statements`, one from a bank statement
+/// `delete-statement-rows`. (Routed by `statement_rows`, with the row's other endpoints.)
 pub async fn delete_row(
     user: CurrentUser,
     State(state): State<Arc<AppState>>,
     UrlPath((slug, id)): UrlPath<(String, i64)>,
 ) -> Result<StatusCode, Response> {
-    let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
-    let removed = delete_hand_added(&state.db, org.id, id).await?;
-    tracing::info!(org = %org.slug, row = id, removed, user = user.id, "hand-added row deleted");
+    let (org, perms) = rbac::org_access(&state.db, &user, &slug).await?;
+    perms
+        .require(Permission::WriteStatements)
+        .or_else(|_| perms.require(Permission::DeleteStatementRows))?;
+    let bank_rows = perms.has(Permission::DeleteStatementRows);
+    let hand_added = perms.has(Permission::WriteStatements);
+    let removed = delete_one(&state.db, org.id, id, hand_added, bank_rows).await?;
+    tracing::info!(org = %org.slug, row = id, removed, user = user.id, "row deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Deletes the hand-added row `id` and its split's rows; returns how many rows went.
-async fn delete_hand_added(db: &Db, org_id: i64, id: i64) -> Result<usize, SplitError> {
+/// Deletes the row `id` and its split's rows, if the caller may (`hand_added`: rows added by
+/// hand; `bank_rows`: rows from a bank statement); returns how many rows went.
+async fn delete_one(
+    db: &Db,
+    org_id: i64,
+    id: i64,
+    hand_added: bool,
+    bank_rows: bool,
+) -> Result<usize, SplitError> {
     let row: DeletableRow = db::query_as(
         "SELECT account_id, txn_id, hand_added, split_of FROM statement_transactions
          WHERE id = ? AND org_id = ?",
@@ -354,10 +372,17 @@ async fn delete_hand_added(db: &Db, org_id: i64, id: i64) -> Result<usize, Split
             "This row is part of a split. Change or remove the split from its original row.".into(),
         ));
     }
-    if !row.hand_added {
-        return Err(SplitError::Invalid(
-            "Only rows added by hand can be deleted. Rows from a bank statement go when their statement is deleted.".into(),
-        ));
+    let allowed = if row.hand_added {
+        hand_added
+    } else {
+        bank_rows
+    };
+    if !allowed {
+        return Err(SplitError::Forbidden(if row.hand_added {
+            "Deleting rows added by hand needs the write-statements permission."
+        } else {
+            "Deleting a row from a bank statement needs the delete-statement-rows permission."
+        }));
     }
     let mut batch = db::Batch::new();
     let splits = batch.push(
@@ -389,7 +414,21 @@ async fn set_effective_date(
     let org = rbac::authorize(&state.db, &user, &slug, Permission::WriteStatements).await?;
     let date = match body.effective_date.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(d) => Some(check_iso_date(d).map_err(|_| bad_request("That isn't a date."))?),
+        Some(d) => {
+            let row_date: String = db::query_scalar(
+                "SELECT date FROM statement_transactions WHERE id = ? AND org_id = ?",
+            )
+            .bind(id)
+            .bind(org.id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(db_error)?
+            .ok_or_else(|| not_found("Row not found."))?;
+            Some(
+                check_effective_date(&row_date, d)
+                    .map_err(|e| bad_request(&format!("That effective date isn't right: {e}.")))?,
+            )
+        }
     };
     let updated = db::query(
         "UPDATE statement_transactions
@@ -475,6 +514,7 @@ mod tests {
     fn message(e: SplitError) -> String {
         match e {
             SplitError::Invalid(m) => m,
+            SplitError::Forbidden(m) => m.to_string(),
             other => panic!("expected a validation error, got {other:?}"),
         }
     }
@@ -654,10 +694,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_hand_added_rows_can_be_deleted_and_take_their_split_with_them() {
+    async fn deleting_rows_needs_the_right_permission_and_takes_their_split() {
         let (db, org, bank_row, _) = setup().await;
-        let err = delete_hand_added(&db, org, bank_row).await.unwrap_err();
-        assert!(message(err).contains("Only rows added by hand"));
+        // A bank row needs delete-statement-rows; write-statements isn't enough.
+        let err = delete_one(&db, org, bank_row, true, false)
+            .await
+            .unwrap_err();
+        assert!(message(err).contains("delete-statement-rows"));
 
         // A row added by hand in a Google Sheet, which has been split.
         let hand: i64 = db::query_scalar(
@@ -679,18 +722,44 @@ mod tests {
         .await
         .unwrap();
         let split_row = rows_of(&db, 88).await[0].id;
-        let err = delete_hand_added(&db, org, split_row).await.unwrap_err();
+        let err = delete_one(&db, org, split_row, true, true)
+            .await
+            .unwrap_err();
         assert!(message(err).contains("part of a split"));
         assert!(matches!(
-            delete_hand_added(&db, org + 1, hand).await,
+            delete_one(&db, org + 1, hand, true, true).await,
             Err(SplitError::NotFound)
         ));
+        // A hand-added row needs write-statements.
+        let err = delete_one(&db, org, hand, false, true).await.unwrap_err();
+        assert!(message(err).contains("write-statements"));
 
-        assert_eq!(delete_hand_added(&db, org, hand).await.unwrap(), 3);
+        assert_eq!(delete_one(&db, org, hand, true, false).await.unwrap(), 3);
         let left: Vec<i64> = db::query_scalar("SELECT id FROM statement_transactions")
             .fetch_all(&db)
             .await
             .unwrap();
         assert_eq!(left, [bank_row]);
+
+        // With delete-statement-rows, a bank row (and its split) can go.
+        save_split(
+            &db,
+            org,
+            bank_row,
+            vec![row("A", "-1", None), row("B", "1", None)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            delete_one(&db, org, bank_row, false, true).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            db::query_scalar::<i64>("SELECT count(*) FROM statement_transactions")
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

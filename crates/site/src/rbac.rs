@@ -44,15 +44,17 @@ pub enum Permission {
     WriteRoles,
     ReadStatements,
     WriteStatements,
+    DeleteStatementRows,
 }
 
 impl Permission {
     /// Every permission, in display order.
-    pub const ALL: [Permission; 6] = [
+    pub const ALL: [Permission; 7] = [
         Permission::ReadDocs,
         Permission::WriteDocs,
         Permission::ReadStatements,
         Permission::WriteStatements,
+        Permission::DeleteStatementRows,
         Permission::ManageOrgs,
         Permission::WriteRoles,
     ];
@@ -66,6 +68,7 @@ impl Permission {
             Permission::WriteRoles => "write-roles",
             Permission::ReadStatements => "read-statements",
             Permission::WriteStatements => "write-statements",
+            Permission::DeleteStatementRows => "delete-statement-rows",
         }
     }
 
@@ -87,7 +90,10 @@ impl Permission {
                 "View saved bank statements and their transactions, and add them to your own Google Sheet."
             }
             Permission::WriteStatements => {
-                "Upload and delete bank statements, and edit the organisation's type rules."
+                "Upload and delete bank statements, and edit the organisation's category rules and upload exclusions."
+            }
+            Permission::DeleteStatementRows => {
+                "Delete single rows that came from a bank statement (rows added by hand only need write-statements)."
             }
         }
     }

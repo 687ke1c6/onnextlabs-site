@@ -1,5 +1,6 @@
 //! A bank statement, whatever its format: detect the format from the file's shape, parse it, then give every row
-//! its id (`id.rs`). Detection and parsing follow n8n's "Determine Statement Type" -> "Parse ..." nodes.
+//! its id (`id.rs`). Detection and parsing of CSVs follow n8n's "Determine Statement Type" -> "Parse ..." nodes;
+//! PDFs (`sb_pdf`) are told apart by the layout version they state.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -10,7 +11,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::hash::{self, DateFormat};
 use crate::id::{self, ID_LIMIT};
-use crate::{googlesheet_csv, sb_csv, sb_pdf_csv};
+use crate::{googlesheet_csv, sb_csv, sb_pdf, sb_pdf_csv};
 
 /// A statement format this app can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,11 +23,18 @@ pub enum Format {
     /// A Google Sheet that n8n (or this app) wrote statement rows to, downloaded as CSV. Not a bank's format: its
     /// rows already have ids, which are kept.
     GoogleSheetCsv,
+    /// Standard Bank PDF "Transaction History Statement", layout version 2026-01 (`sb_pdf`).
+    SbPdf2026_01,
 }
 
 impl Format {
     /// Every known format, in detection order.
-    pub const ALL: [Format; 3] = [Format::SbCsv, Format::SbPdfCsv, Format::GoogleSheetCsv];
+    pub const ALL: [Format; 4] = [
+        Format::SbCsv,
+        Format::SbPdfCsv,
+        Format::GoogleSheetCsv,
+        Format::SbPdf2026_01,
+    ];
 
     /// The name used in the config and messages.
     pub fn id(self) -> &'static str {
@@ -34,7 +42,13 @@ impl Format {
             Format::SbCsv => "sb_csv",
             Format::SbPdfCsv => "sb_pdf_csv",
             Format::GoogleSheetCsv => "googlesheet_csv",
+            Format::SbPdf2026_01 => "sb_pdf_2026_01",
         }
+    }
+
+    /// A PDF, rather than a CSV.
+    pub fn is_pdf(self) -> bool {
+        matches!(self, Format::SbPdf2026_01)
     }
 
     /// The format with this config name (e.g. `sb_csv`).
@@ -47,6 +61,7 @@ impl Format {
             Format::SbCsv => "Standard Bank CSV",
             Format::SbPdfCsv => "Standard Bank PDF, converted to CSV",
             Format::GoogleSheetCsv => "Google Sheet export (CSV)",
+            Format::SbPdf2026_01 => "Standard Bank PDF statement (2026-01 layout)",
         }
     }
 
@@ -56,6 +71,7 @@ impl Format {
             Format::SbCsv => "first cell is \"0\"",
             Format::SbPdfCsv => "header row starts \"description,amount,date\"",
             Format::GoogleSheetCsv => "header row has id, date, amount and description columns",
+            Format::SbPdf2026_01 => "a PDF whose footer reads \"PPB00067436 2026-01\"",
         }
     }
 
@@ -64,6 +80,8 @@ impl Format {
             Format::SbCsv => sb_csv::matches(rows),
             Format::SbPdfCsv => sb_pdf_csv::matches(rows),
             Format::GoogleSheetCsv => googlesheet_csv::matches(rows),
+            // Not a CSV.
+            Format::SbPdf2026_01 => false,
         }
     }
 
@@ -72,6 +90,7 @@ impl Format {
             Format::SbCsv => sb_csv::parse(rows),
             Format::SbPdfCsv => sb_pdf_csv::parse(rows),
             Format::GoogleSheetCsv => googlesheet_csv::parse(rows),
+            Format::SbPdf2026_01 => unreachable!("a PDF format never matches CSV rows"),
         }
     }
 }
@@ -169,8 +188,15 @@ pub fn parse_file(path: &Path) -> Result<Statement> {
 }
 
 /// Detects the format, parses the rows and assigns ids. Cells are used exactly as read: no trimming.
-pub fn parse<R: Read>(reader: R) -> Result<Statement> {
-    let rows = read_rows(reader)?;
+pub fn parse<R: Read>(mut reader: R) -> Result<Statement> {
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .context("reading the statement")?;
+    if bytes.starts_with(b"%PDF-") {
+        return parse_pdf(&bytes);
+    }
+    let rows = read_rows(&bytes[..])?;
     let Some(format) = detect(&rows) else {
         let known: Vec<String> = Format::ALL
             .iter()
@@ -195,6 +221,36 @@ pub fn parse<R: Read>(reader: R) -> Result<Statement> {
         account_number,
         transactions,
         id_check,
+    })
+}
+
+/// A PDF statement: the layout it states decides the format.
+fn parse_pdf(pdf: &[u8]) -> Result<Statement> {
+    let text = sb_pdf::text(pdf)?;
+    let format = match sb_pdf::kind(&text) {
+        sb_pdf::Kind::Current => Format::SbPdf2026_01,
+        sb_pdf::Kind::OtherVersion(version) => bail!(
+            "this is a Standard Bank PDF statement in a layout this app doesn't read yet ({version}; it reads \
+             {} {}). Upload the CSV statement instead until it does.",
+            sb_pdf::FORM,
+            sb_pdf::VERSION
+        ),
+        sb_pdf::Kind::Unknown => bail!(
+            "unrecognised PDF. The only PDF statements this app reads are {}.",
+            Format::SbPdf2026_01
+        ),
+    };
+    let Parsed {
+        account_number,
+        mut transactions,
+        ..
+    } = sb_pdf::parse_text(&text).with_context(|| format!("parsing {format}"))?;
+    assign_ids(&mut transactions)?;
+    Ok(Statement {
+        format,
+        account_number,
+        transactions,
+        id_check: None,
     })
 }
 
@@ -261,6 +317,37 @@ pub fn n8n_ids(transactions: &[Transaction]) -> Vec<(i32, String)> {
             (n8n_id, description)
         })
         .collect()
+}
+
+/// How far a row's effective date may be from its date, in days. Effective dates move a row to a nearby
+/// month (a payment on the 1st that belongs to the month before); one a year or more away is a typing slip.
+pub const MAX_EFFECTIVE_DAYS: i64 = 366;
+
+/// An effective date for a row dated `date` (both `YYYY-MM-DD`): a real date within [`MAX_EFFECTIVE_DAYS`] of it.
+pub fn check_effective_date(date: &str, effective: &str) -> Result<String> {
+    let effective = check_iso_date(effective)?;
+    let apart = (day_number(&effective) - day_number(&check_iso_date(date)?)).abs();
+    ensure!(
+        apart <= MAX_EFFECTIVE_DAYS,
+        "{effective} is more than a year from the row's date ({date})"
+    );
+    Ok(effective)
+}
+
+/// Days since 1970-01-01 of a checked `YYYY-MM-DD` (proleptic Gregorian).
+fn day_number(date: &str) -> i64 {
+    let (y, m, d): (i64, i64, i64) = (
+        date[0..4].parse().expect("checked"),
+        date[5..7].parse().expect("checked"),
+        date[8..10].parse().expect("checked"),
+    );
+    // Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// `YYYY-MM-DD`, checked to be a real date.
@@ -364,5 +451,19 @@ mod tests {
         let csv = DUPLICATES.replace("-5.00", "R5");
         let err = format!("{:#}", parse(csv.as_bytes()).unwrap_err());
         assert!(err.contains("amount \"R5\" isn't a number"), "{err}");
+    }
+
+    #[test]
+    fn effective_dates_are_within_a_year_of_the_date() {
+        assert_eq!(day_number("1970-01-01"), 0);
+        assert_eq!(day_number("2026-03-01") - day_number("2026-02-28"), 1);
+        assert_eq!(
+            check_effective_date("2026-08-28", "2026-09-01").unwrap(),
+            "2026-09-01"
+        );
+        assert!(check_effective_date("2026-08-28", "2025-08-27").is_ok());
+        assert!(check_effective_date("2026-08-28", "2027-08-30").is_err());
+        assert!(check_effective_date("2026-08-28", "0002-09-01").is_err());
+        assert!(check_effective_date("2026-08-28", "2026-02-30").is_err());
     }
 }

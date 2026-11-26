@@ -356,7 +356,7 @@ async fn check_filter(
     }
 
     if f.types.len() > MAX_TYPES {
-        return bad(format!("at most {MAX_TYPES} types"));
+        return bad(format!("at most {MAX_TYPES} categories"));
     }
     let mut types = Vec::new();
     for t in f.types.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
@@ -366,7 +366,7 @@ async fn check_filter(
         {
             Some(name) if !types.contains(&name) => types.push(name),
             Some(_) => {}
-            None => return bad(format!("{t:?} isn't on the types list")),
+            None => return bad(format!("{t:?} isn't on the categories list")),
         }
     }
     f.types = types;
@@ -519,7 +519,7 @@ mod tests {
         };
         assert!(message(&db, org, with(unknown))
             .await
-            .contains("\\\"Nope\\\" isn't on the types list"));
+            .contains("\\\"Nope\\\" isn't on the categories list"));
         let backwards = FilterJson {
             date_from: Some("2025-03-01".into()),
             date_to: Some("2025-02-28".into()),

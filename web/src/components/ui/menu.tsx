@@ -43,7 +43,7 @@ export function Menu(props: {
   let button!: HTMLButtonElement;
   let panel: HTMLDivElement | undefined;
 
-  const items = () => Array.from(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+  const items = () => Array.from(panel?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? []);
 
   const close = (refocus = false) => {
     setOpen(false);
@@ -105,8 +105,11 @@ export function Menu(props: {
             id={id}
             role="menu"
             aria-label={props.label}
+            // Focusable, so clicking something inside that isn't (a label's text) focuses the panel
+            // instead of the page, which would otherwise read as focus leaving and close the menu.
+            tabindex="-1"
             class={cn(
-              "absolute bottom-full left-0 z-30 mb-2 w-60 rounded-lg border border-border bg-background p-1 text-foreground shadow-xl",
+              "absolute bottom-full left-0 z-30 mb-2 w-60 rounded-lg border border-border bg-background p-1 text-foreground shadow-xl outline-none",
               props.class,
             )}
           >

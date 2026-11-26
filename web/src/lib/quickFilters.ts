@@ -1,5 +1,5 @@
 import { json, send } from "~/lib/orgs";
-import { amountValue, type OrgTransaction } from "~/lib/statements";
+import { amountValue, type DateBasis, dayOf, type OrgTransaction } from "~/lib/statements";
 
 /**
  * Quick filters: named filters shown as toggles above the statement grid, per organisation.
@@ -19,7 +19,7 @@ export type FilterGroup = {
 /** Matches a row when every condition it has holds. */
 export type QuickFilter = {
   name: string;
-  /** YYYY-MM-DD, inclusive; compared with the effective date (or the date). */
+  /** YYYY-MM-DD, inclusive; compared with the day the row counts on (see `dateBasis`). */
   date_from: string | null;
   date_to: string | null;
   /** Any of these types. */
@@ -39,11 +39,8 @@ export const fetchFilterGroups = async (org: string) => json<FilterGroup[]>(awai
 export const saveFilterGroups = async (org: string, groups: FilterGroup[]) =>
   json<FilterGroup[]>(await send("PUT", url(org), { groups }), "Couldn't save the quick filters.");
 
-/** The date a row counts towards: its effective date, or its date. */
-export const rowDate = (r: Pick<OrgTransaction, "date" | "effective_date">) => r.effective_date ?? r.date;
-
-export function matches(f: QuickFilter, r: OrgTransaction): boolean {
-  const date = rowDate(r);
+export function matches(f: QuickFilter, r: OrgTransaction, basis: DateBasis): boolean {
+  const date = dayOf(r, basis);
   if (f.date_from && date < f.date_from) return false;
   if (f.date_to && date > f.date_to) return false;
   if (f.types.length) {
@@ -84,11 +81,11 @@ function dayBefore(iso: string) {
 }
 
 /** One chip per year with rows, newest first: "2024/25" (or "2024" for years from 1 January). */
-export function yearlyChips(group: FilterGroup, rows: OrgTransaction[]): Chip[] {
+export function yearlyChips(group: FilterGroup, rows: OrgTransaction[], basis: DateBasis): Chip[] {
   const md = `${pad(group.start_month ?? 1)}-${pad(group.start_day ?? 1)}`;
   const years = new Set<number>();
   for (const r of rows) {
-    const date = rowDate(r);
+    const date = dayOf(r, basis);
     const y = Number(date.slice(0, 4));
     years.add(date.slice(5) >= md ? y : y - 1);
   }
@@ -106,8 +103,8 @@ export function yearlyChips(group: FilterGroup, rows: OrgTransaction[]): Chip[] 
     });
 }
 
-export function groupChips(group: FilterGroup, rows: OrgTransaction[]): Chip[] {
-  if (group.kind === "yearly") return yearlyChips(group, rows);
+export function groupChips(group: FilterGroup, rows: OrgTransaction[], basis: DateBasis): Chip[] {
+  if (group.kind === "yearly") return yearlyChips(group, rows, basis);
   return group.filters.map((f) => ({ id: `${group.name}\u001f${f.name}`, label: f.name, title: describe(f), filter: f }));
 }
 
@@ -117,7 +114,7 @@ export function describe(f: QuickFilter): string {
   if (f.date_from && f.date_to) parts.push(`${longDate(f.date_from)} – ${longDate(f.date_to)}`);
   else if (f.date_from) parts.push(`from ${longDate(f.date_from)}`);
   else if (f.date_to) parts.push(`to ${longDate(f.date_to)}`);
-  if (f.types.length) parts.push(`type ${f.types.join(" or ")}`);
+  if (f.types.length) parts.push(`category ${f.types.join(" or ")}`);
   if (f.contains.length) parts.push(`description has ${f.contains.map((c) => `"${c}"`).join(" or ")}`);
   if (f.min_amount !== null && f.max_amount !== null) parts.push(`amount ${f.min_amount} to ${f.max_amount}`);
   else if (f.min_amount !== null) parts.push(`amount ≥ ${f.min_amount}`);
@@ -129,8 +126,13 @@ export function describe(f: QuickFilter): string {
  * The rows the toggled chips let through: within a group any toggled chip (OR), across groups
  * all of them (AND). Groups with nothing toggled don't filter.
  */
-export function applyChips(rows: OrgTransaction[], groups: { chips: Chip[] }[], active: Set<string>): OrgTransaction[] {
+export function applyChips(
+  rows: OrgTransaction[],
+  groups: { chips: Chip[] }[],
+  active: Set<string>,
+  basis: DateBasis,
+): OrgTransaction[] {
   const filters = groups.map((g) => g.chips.filter((c) => active.has(c.id)).map((c) => c.filter)).filter((fs) => fs.length > 0);
   if (!filters.length) return rows;
-  return rows.filter((r) => filters.every((fs) => fs.some((f) => matches(f, r))));
+  return rows.filter((r) => filters.every((fs) => fs.some((f) => matches(f, r, basis))));
 }

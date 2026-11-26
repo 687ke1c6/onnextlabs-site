@@ -1,0 +1,18 @@
+[package]
+name = "statements-pdf"
+version = "0.1.0"
+edition = "2024"
+description = "Statement PDFs: a Typst template plus the statement's data, rendered to PDF."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+# Already in the tree via Typst (its PDF images): only to count a letterhead's pages.
+hayro-syntax = "0.7.2"
+typst = "0.15.1"
+typst-assets = { version = "0.15.1", features = ["fonts"] }
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
+
+[dev-dependencies]
+typst-render = "0.15.1"

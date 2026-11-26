@@ -65,6 +65,7 @@ async fn main() {
                 .unwrap_or_else(|_| "db_server=info".into()),
         )
         .init();
+    tracing::info!("db-server {}", env!("CARGO_PKG_VERSION"));
 
     let args = Args::parse();
     let token = args.token.as_deref().filter(|t| !t.is_empty());
@@ -112,9 +113,48 @@ async fn open(dir: &std::path::Path) -> Result<SqlitePool, Box<dyn std::error::E
         .connect_with(opts)
         .await
         .map_err(|e| format!("opening {}: {e}", path.display()))?;
-    sqlx::migrate!("../../migrations").run(&pool).await?;
+    migrate(&pool).await?;
     tracing::info!("database ready at {}", path.display());
     Ok(pool)
+}
+
+/// Applies the migrations built into this binary, logging which ones it has, which the database
+/// already had, and which it applied.
+async fn migrate(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
+    let migrator = sqlx::migrate!("../../migrations");
+    let embedded = migrator.iter().map(|m| m.version).max().unwrap_or(0);
+    tracing::info!(
+        "migrations in this binary: {} (latest {embedded})",
+        migrator.iter().count()
+    );
+    let before = applied(pool).await;
+    tracing::info!("database at migration {}", before.last().copied().unwrap_or(0));
+
+    migrator.run(pool).await.map_err(|e| format!("migrations: {e}"))?;
+
+    let after = applied(pool).await;
+    let new: Vec<_> = after.iter().filter(|v| !before.contains(v)).collect();
+    if new.is_empty() {
+        tracing::info!("no pending migrations");
+    } else {
+        tracing::info!("applied migrations {new:?}");
+    }
+    if let Some(&latest) = after.last() {
+        if latest > embedded {
+            tracing::warn!(
+                "database has migration {latest}, newer than this binary's latest ({embedded})"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Versions recorded in `_sqlx_migrations`, in order (empty before the first run).
+async fn applied(pool: &SqlitePool) -> Vec<i64> {
+    sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
 }
 
 fn app(db: SqlitePool, token: Option<&str>, max_body: usize, scratch_dir: PathBuf) -> Router {

@@ -16,7 +16,9 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::hash::{DateFormat, row_id as n8n_id};
 use crate::row::Column;
-use crate::statement::{IdCheck, IdMismatch, Parsed, StatedId, Transaction, check_iso_date};
+use crate::statement::{
+    IdCheck, IdMismatch, Parsed, StatedId, Transaction, check_effective_date, check_iso_date,
+};
 
 /// Where each column this format reads is in the file.
 struct Columns {
@@ -114,7 +116,9 @@ fn read_row(row: &csv::StringRecord, c: &Columns) -> Result<(Option<i64>, Transa
     let date = cell(c.date).trim();
     let date = check_iso_date(date).with_context(|| format!("bad date {date:?}"))?;
     let effective_date = optional(c.effective_date)
-        .map(|d| check_iso_date(d).with_context(|| format!("bad effective_date {d:?}")))
+        .map(|d| {
+            check_effective_date(&date, d).with_context(|| format!("bad effective_date {d:?}"))
+        })
         .transpose()?;
     let amount = cell(c.amount);
     ensure!(!amount.trim().is_empty(), "missing amount");

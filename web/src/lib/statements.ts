@@ -1,3 +1,4 @@
+import { type Accessor, createRoot, createSignal, type Signal } from "solid-js";
 import { json, send } from "~/lib/orgs";
 import type { DeleteImpact } from "~/lib/deleteImpact";
 
@@ -38,7 +39,29 @@ export type PreviewRow = Transaction & {
 };
 
 /** An account statements are uploaded into. */
-export type Account = { id: number; name: string; identifier: string | null };
+export type Account = {
+  id: number;
+  name: string;
+  identifier: string | null;
+  /** What statement PDFs show about the account. */
+  holder_name: string | null;
+  product_name: string | null;
+  /** The balance at the start of `opening_balance_date` (both or neither), which statement balances are worked out from. */
+  opening_balance_cents: number | null;
+  opening_balance_date: string | null;
+  /** The statement template it was last printed with. */
+  last_template_id: number | null;
+};
+
+/** An account's statement details, as typed (blank = none). */
+export type AccountDetails = {
+  holder_name: string;
+  product_name: string;
+  /** e.g. `40,957.20` or `-1200` */
+  opening_balance: string;
+  /** YYYY-MM-DD */
+  opening_balance_date: string;
+};
 
 /** An account, with what's in it. */
 export type AccountSummary = Account & {
@@ -50,6 +73,17 @@ export type AccountSummary = Account & {
 
 /** How the account number a statement states compares with the account's identifier. */
 export type AccountCheck = "match" | "mismatch" | "no_identifier" | "not_stated";
+
+/** A line of a statement an upload exclusion leaves out. */
+export type ExcludedRow = {
+  txn_id: number;
+  date: string;
+  amount: string;
+  description: string;
+  currency: string;
+  /** Saved before the exclusion existed: it stays until deleted (the exclusion's ▶ lists and deletes them). */
+  stored: boolean;
+};
 
 export type Preview = {
   filename: string;
@@ -69,6 +103,8 @@ export type Preview = {
   new: number;
   existing: number;
   transactions: PreviewRow[];
+  /** Lines the account's upload exclusions leave out: never saved. */
+  excluded: ExcludedRow[];
   id_check: IdCheck | null;
   /** Types the file gives that aren't on the list yet; saving adds them. */
   new_types: string[];
@@ -81,6 +117,8 @@ export type Preview = {
 export type UploadSummary = {
   id: number;
   format: string;
+  /** e.g. "Standard Bank PDF statement (2026-01 layout)". */
+  format_name: string;
   /** The account it was saved into. */
   account_id: number;
   account_name: string;
@@ -97,7 +135,12 @@ export type UploadSummary = {
   last_date: string | null;
 };
 
-export type UploadDetail = UploadSummary & { format_name: string; transactions: Transaction[] };
+export type UploadDetail = UploadSummary & { transactions: Transaction[] };
+
+/** A statement format uploads can be in. */
+export type StatementFormat = { id: string; name: string; pdf: boolean };
+
+export const fetchFormats = async () => json<StatementFormat[]>(await fetch("/api/statement-formats"), "Couldn't load the statement formats.");
 
 /** A type rule; it belongs to an account. */
 export type Rule = {
@@ -141,13 +184,14 @@ export const fetchUploads = async (org: string, account: number) =>
 
 // ---- accounts ----
 
-export const fetchAccounts = async (org: string) => json<AccountSummary[]>(await fetch(accounts(org)), "Couldn't load accounts.");
+export const fetchAccounts = async (org: string) => json<AccountSummary[]>(await fetch(accounts(org)), "Couldn't load bank accounts.");
 
-export const createAccount = async (org: string, name: string, identifier: string) =>
-  json<Account>(await send("POST", accounts(org), { name, identifier }), "Couldn't create the account.");
+export const createAccount = async (org: string, name: string, identifier: string, details?: AccountDetails) =>
+  json<Account>(await send("POST", accounts(org), { name, identifier, details }), "Couldn't create the bank account.");
 
-export const updateAccount = async (org: string, id: number, name: string, identifier: string) =>
-  json<Account>(await send("PATCH", `${accounts(org)}/${id}`, { name, identifier }), "Couldn't save the account.");
+/** Without `details`, the account's details stay as they are. */
+export const updateAccount = async (org: string, id: number, name: string, identifier: string, details?: AccountDetails) =>
+  json<Account>(await send("PATCH", `${accounts(org)}/${id}`, { name, identifier, details }), "Couldn't save the bank account.");
 
 /** What deleting the account would remove. */
 export const fetchAccountDeleteImpact = async (org: string, id: number) =>
@@ -155,7 +199,7 @@ export const fetchAccountDeleteImpact = async (org: string, id: number) =>
 
 /** Deletes the account and everything in it (`confirm` is its name, typed). */
 export const deleteAccount = async (org: string, id: number, confirm: string) =>
-  json<void>(await send("DELETE", `${accounts(org)}/${id}`, { confirm }), "Couldn't delete the account.");
+  json<void>(await send("DELETE", `${accounts(org)}/${id}`, { confirm }), "Couldn't delete the bank account.");
 
 // ---- saved statements ----
 
@@ -175,10 +219,51 @@ export const deleteUpload = async (org: string, id: number) =>
 // ---- type rules (per account) ----
 
 export const fetchRules = async (org: string, account: number) =>
-  json<{ rules: Rule[] }>(await fetch(`${accounts(org)}/${account}/rules`), "Couldn't load the type rules.");
+  json<{ rules: Rule[] }>(await fetch(`${accounts(org)}/${account}/rules`), "Couldn't load the category rules.");
 
 export const saveRules = async (org: string, account: number, rules: Rule[]) =>
-  json<{ rules: Rule[] }>(await send("PUT", `${accounts(org)}/${account}/rules`, { rules }), "Couldn't save the type rules.");
+  json<{ rules: Rule[] }>(await send("PUT", `${accounts(org)}/${account}/rules`, { rules }), "Couldn't save the category rules.");
+
+// ---- upload exclusions (per account) ----
+
+/** Lines a statement states that are never saved: the description contains any of `contains` (ignoring case). */
+export type Exclusion = {
+  contains: string[];
+  /** Why, for whoever reads the rules later. */
+  note: string;
+};
+
+export const fetchExclusions = async (org: string, account: number) =>
+  json<{ rules: Exclusion[] }>(await fetch(`${accounts(org)}/${account}/exclusions`), "Couldn't load the exclusions.");
+
+export const saveExclusions = async (org: string, account: number, rules: Exclusion[]) =>
+  json<{ rules: Exclusion[] }>(await send("PUT", `${accounts(org)}/${account}/exclusions`, { rules }), "Couldn't save the exclusions.");
+
+/** A saved row an exclusion matches. */
+export type ExcludedMatch = {
+  id: number;
+  date: string;
+  description: string;
+  amount: string;
+  currency: string;
+  /** Rows in its split (deleted with it), and documents attached (the links go; the documents stay). */
+  split_rows: number;
+  attachments: number;
+};
+
+/** The account's saved rows exclusion `rule` (0-based) matches, oldest first. */
+export const fetchExcludedMatches = async (org: string, account: number, rule: number) =>
+  json<{ rows: ExcludedMatch[] }>(
+    await fetch(`${accounts(org)}/${account}/exclusions/${rule}/matches`),
+    "Couldn't find the matching rows.",
+  );
+
+/** Deletes those of the rows the exclusion still matches, with their splits. Needs `delete-statement-rows`. */
+export const deleteExcludedMatches = async (org: string, account: number, rule: number, ids: number[]) =>
+  json<{ deleted: number }>(
+    await send("POST", `${accounts(org)}/${account}/exclusions/${rule}/matches/delete`, { ids }),
+    "Couldn't delete the rows.",
+  );
 
 /** A stored row whose type the saved rules would change. */
 export type TypeChange = {
@@ -230,8 +315,16 @@ export function formatDate(iso: string | null): string {
 export const formatPeriod = (first: string | null, last: string | null) =>
   first && last ? (first === last ? formatDate(first) : `${formatDate(first)} – ${formatDate(last)}`) : "—";
 
-/** Amounts are kept exactly as in the file; negatives get a proper minus sign. */
-export const formatAmount = (amount: string) => (amount.startsWith("-") ? `−${amount.slice(1)}` : amount);
+/**
+ * An amount for display, the same way whatever the file wrote ("-27177.56" and "-27,177.56"
+ * both show as "−27,177.56"). Amounts are stored exactly as in the file (row ids are
+ * worked out from that text); one that can't be read shows as it is, with a proper minus sign.
+ */
+export const formatAmount = (amount: string) => {
+  const cents = amountCents(amount);
+  if (cents !== null) return formatMoney(cents);
+  return amount.startsWith("-") ? `−${amount.slice(1)}` : amount;
+};
 
 export const isNegative = (amount: string) => amount.trim().startsWith("-");
 
@@ -271,24 +364,24 @@ export type TypeInfo = { id: number; name: string; rows: number; rules: number }
 
 const types = (org: string) => `${base(org)}/statement-types`;
 
-export const fetchTypes = async (org: string) => json<TypeInfo[]>(await fetch(types(org)), "Couldn't load the types.");
+export const fetchTypes = async (org: string) => json<TypeInfo[]>(await fetch(types(org)), "Couldn't load the categories.");
 
 export const createType = async (org: string, name: string) =>
-  json<TypeInfo[]>(await send("POST", types(org), { name }), "Couldn't add the type.");
+  json<TypeInfo[]>(await send("POST", types(org), { name }), "Couldn't add the category.");
 
 /** Renames it on every row and rule too. */
 export const renameType = async (org: string, id: number, name: string) =>
-  json<TypeInfo[]>(await send("PATCH", `${types(org)}/${id}`, { name }), "Couldn't rename the type.");
+  json<TypeInfo[]>(await send("PATCH", `${types(org)}/${id}`, { name }), "Couldn't rename the category.");
 
 /** Refused while a row or rule uses it. */
 export const deleteType = async (org: string, id: number) =>
-  json<TypeInfo[]>(await send("DELETE", `${types(org)}/${id}`), "Couldn't delete the type.");
+  json<TypeInfo[]>(await send("DELETE", `${types(org)}/${id}`), "Couldn't delete the category.");
 
 /** Sets a row's type by hand (or clears it with null, so saved statements can type it again). */
 export const setRowType = async (org: string, row: number, type: string | null) =>
   json<{ type: string | null; type_manual: boolean }>(
     await send("PATCH", `${base(org)}/statement-transactions/${row}`, { type }),
-    "Couldn't change the type.",
+    "Couldn't change the category.",
   );
 
 
@@ -375,3 +468,251 @@ export const attachDocument = async (org: string, id: number, documentId: number
 /** Removes the link; the document itself stays. */
 export const detachDocument = async (org: string, id: number, documentId: number) =>
   json<RowDetail>(await send("DELETE", `${row(org, id)}/documents/${documentId}`), "Couldn't remove the document.");
+
+// ---- statement PDFs ----
+
+export type HeaderField = { label: string; value: string };
+
+export type ColumnKey = "date" | "effective_date" | "description" | "type" | "amount" | "debit" | "credit" | "balance";
+
+/** A column of a template's transaction table: what it shows, and its heading. */
+export type Column = { key: ColumnKey; label: string };
+
+/** A column a table can have: its usual heading and what it shows. */
+export type ColumnChoice = { key: ColumnKey; label: string; hint: string };
+
+export type SummaryKey = "count" | "money_in" | "money_out" | "net" | "opening_balance" | "closing_balance";
+
+/** A figure in a template's summary, with its label (may use variables). */
+export type SummaryItem = { key: SummaryKey; label: string };
+
+/** Which totals a template prints, and what they're called (labels may use variables). */
+export type TotalsOptions = {
+  /** The summary near the top, in order; empty for none. Balances drop out when the account has none. */
+  summary: SummaryItem[];
+  summary_title: string;
+  /** A totals row at the end of the table. */
+  table_row: boolean;
+  table_row_label: string;
+  /** A subtotal after each type, when grouped by type. */
+  subtotals: boolean;
+  subtotal_label: string;
+  /** The table's first row when a running balance prints. */
+  opening_row_label: string;
+};
+
+/** Which date decides the period, the balances and the running balance's order. */
+export type DateBasis = "transaction" | "effective";
+
+/** How statements print: one of the org's templates (any account can print with any of them). */
+export type TemplateSettings = {
+  name: string;
+  /** A built-in layout: `standard` or `bank`. */
+  layout: string;
+  /** Title, subtitle, footer and header fields can use `{name}` variables. */
+  title: string;
+  subtitle: string;
+  header_fields: HeaderField[];
+  footer: string;
+  /** A Documents image. */
+  logo_document_id: number | null;
+  /** A Documents PDF drawn behind the pages. */
+  letterhead_document_id: number | null;
+  /** The letterhead on every page (its second page, if it has one, behind the later ones), or the first only. */
+  letterhead_every_page: boolean;
+  /** Space kept clear at the top and bottom of each page, in mm (5 to 150). */
+  margin_top_mm: number;
+  margin_bottom_mm: number;
+  paper: "a4" | "us-letter";
+  /** The transaction table's columns, in order, with their headings. */
+  columns: Column[];
+  totals: TotalsOptions;
+  /** The totals by type table (standard layout). */
+  show_summary: boolean;
+  group_by_type: boolean;
+  /** `short` 4 Oct 2026, `padded` 04 Oct 2026. */
+  date_style: "short" | "padded";
+  /** Before balances and totals, e.g. `R`. */
+  currency_symbol: string;
+};
+
+export type Template = TemplateSettings & { id: number; updated_at: string };
+
+type DocumentPlace = { folder: string; filename: string };
+
+/** A template, with where its logo and letterhead are in Documents (null if none or gone). */
+export type TemplateView = Template & { logo: DocumentPlace | null; letterhead: DocumentPlace | null };
+
+export type Choice = { name: string; label: string };
+
+export type TemplateList = {
+  templates: Template[];
+  variables: Choice[];
+  layouts: Choice[];
+  columns: ColumnChoice[];
+  summary_figures: { key: SummaryKey; label: string; hint: string }[];
+};
+
+const templates = (org: string) => `${base(org)}/statement-templates`;
+
+/** The org's templates (it always has at least one), and the variables and layouts they can use. */
+export const fetchTemplates = async (org: string) => json<TemplateList>(await fetch(templates(org)), "Couldn't load the templates.");
+
+export const fetchTemplate = async (org: string, id: number) =>
+  json<TemplateView>(await fetch(`${templates(org)}/${id}`), "Couldn't load the template.");
+
+/** A new template from a layout's defaults, or a copy of another. */
+export const createTemplate = async (org: string, body: { name: string; layout?: string; copy_of?: number }) =>
+  json<TemplateView>(await send("POST", templates(org), body), "Couldn't create the template.");
+
+export const saveTemplate = async (org: string, id: number, settings: TemplateSettings) =>
+  json<TemplateView>(await send("PUT", `${templates(org)}/${id}`, settings), "Couldn't save the template.");
+
+export const deleteTemplate = async (org: string, id: number) =>
+  json<void>(await send("DELETE", `${templates(org)}/${id}`), "Couldn't delete the template.");
+
+const pdf = (org: string, account: number) => `${accounts(org)}/${account}`;
+
+/** A statement period, YYYY-MM-DD. */
+export type Period = { from: string; to: string };
+
+/** What printing would show: the period, the account's balances (from all its rows), and whether a running balance can print. */
+export type PrintSummary = {
+  from: string | null;
+  to: string | null;
+  opening_cents: number | null;
+  closing_cents: number | null;
+  /** How many of the account's rows are dated in the period. */
+  period_rows: number;
+  /** The printed rows are exactly those. */
+  rows_complete: boolean;
+};
+
+export const fetchPrintSummary = async (
+  org: string,
+  account: number,
+  body: { rows: number[]; period: Period | null; date_basis: DateBasis },
+) => json<PrintSummary>(await send("POST", `${pdf(org, account)}/pdf/summary`, body), "Couldn't work out the balances.");
+
+/** `-123456` -> `−1,234.56` (for showing; [formatCents] is for editing) */
+export const formatMoney = (cents: number) => {
+  const abs = Math.abs(cents);
+  const whole = String(Math.floor(abs / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const text = `${whole}.${String(abs % 100).padStart(2, "0")}`;
+  return cents < 0 ? `−${text}` : text;
+};
+
+/** The file name from a Content-Disposition header (its UTF-8 form if there is one). */
+function dispositionName(header: string | null, fallback: string) {
+  const star = header?.match(/filename\*=UTF-8''([^;]+)/i);
+  if (star) return decodeURIComponent(star[1]);
+  return header?.match(/filename="([^"]+)"/i)?.[1] ?? fallback;
+}
+
+/**
+ * Prints rows of the account (row ids, in order) as a PDF. `selection` says in words what they
+ * are; `save` also keeps a copy in Documents (its id comes back).
+ */
+export async function printStatementPdf(
+  org: string,
+  account: number,
+  body: {
+    rows: number[];
+    selection: string[];
+    save: boolean;
+    template_id: number | null;
+    period: Period | null;
+    date_basis?: DateBasis;
+  },
+) {
+  const res = await send("POST", `${pdf(org, account)}/pdf`, body);
+  if (!res.ok) await json<never>(res, "Couldn't make the PDF.");
+  const id = res.headers.get("x-document-id");
+  return {
+    blob: await res.blob(),
+    filename: dispositionName(res.headers.get("content-disposition"), "statement.pdf"),
+    documentId: id ? Number(id) : null,
+  };
+}
+
+/** Starts a download of `blob` as `filename`. */
+export function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+/** The day a row counts on, by `basis`: its date, or its effective date where it has one. */
+export const dayOf = (r: Pick<OrgTransaction, "date" | "effective_date">, basis: DateBasis) =>
+  basis === "effective" ? (r.effective_date ?? r.date) : r.date;
+
+/**
+ * The order rows happen in, by `basis`: by day, then the order they were stored (same-day rows
+ * have no better order). Running balances run in it, so the grid shows rows in it too.
+ */
+export const ledgerOrder = (basis: DateBasis) => (a: OrgTransaction, b: OrgTransaction) =>
+  dayOf(a, basis).localeCompare(dayOf(b, basis)) || a.id - b.id;
+
+const basisKey = (org: string) => `statement-date-basis:${org}`;
+const bases = new Map<string, Signal<DateBasis>>();
+
+/**
+ * Which date counts for the org's statement rows in this browser, shared by the grid (quick
+ * filters, sorting, Month, balances) and printing: the transaction date, or the effective date
+ * where a row has one. Remembered per org.
+ */
+export function dateBasis(org: string): [Accessor<DateBasis>, (b: DateBasis) => void] {
+  let signal = bases.get(org);
+  if (!signal) {
+    let start: DateBasis = "transaction";
+    try {
+      if (localStorage.getItem(basisKey(org)) === "effective") start = "effective";
+    } catch {
+      // storage blocked: the default
+    }
+    signal = createRoot(() => createSignal<DateBasis>(start));
+    bases.set(org, signal);
+  }
+  const [get, set] = signal;
+  return [
+    get,
+    (b) => {
+      set(b);
+      try {
+        localStorage.setItem(basisKey(org), b);
+      } catch {
+        // just don't remember
+      }
+    },
+  ];
+}
+
+/**
+ * Each row's balance after it, in cents, from the account's opening balance (`cents` at the start
+ * of `date`) and *all* its rows: in day order on `basis`, then the order rows were stored (as a
+ * printed statement's running balance). Rows before the opening date work backwards from it. Missing for
+ * every row when an amount isn't a number, since no balance after it would be right.
+ */
+export function runningBalances(
+  rows: OrgTransaction[],
+  opening: { cents: number; date: string },
+  basis: DateBasis,
+): Map<number, number> {
+  const ordered = [...rows].sort(ledgerOrder(basis));
+  const cents = ordered.map((r) => Math.round(amountValue(r.amount) * 100));
+  if (cents.some((c) => !Number.isFinite(c))) return new Map();
+  // The balance after a row = opening + every row up to it − every row before the opening date.
+  const before = ordered.reduce((sum, r, i) => (dayOf(r, basis) < opening.date ? sum + cents[i] : sum), 0);
+  const balances = new Map<number, number>();
+  let sum = 0;
+  ordered.forEach((r, i) => {
+    sum += cents[i];
+    balances.set(r.id, opening.cents + sum - before);
+  });
+  return balances;
+}

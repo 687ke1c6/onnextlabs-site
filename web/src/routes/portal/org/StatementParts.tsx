@@ -7,7 +7,7 @@ import { useOrg } from "~/routes/portal/org/OrgLayout";
 
 const TAB = "rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-/** Statement | Uploads | Type rules | Quick filters | Accounts, under the page header. */
+/** Statement | Uploads | Type rules | Quick filters | Accounts | Templates, under the page header. */
 export function StatementsTabs() {
   const org = useOrg();
   return (
@@ -38,7 +38,7 @@ export function StatementsTabs() {
         activeProps={{ class: "bg-secondary text-foreground" }}
         inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
       >
-        Type rules
+        Category rules
       </Link>
       <Link
         to="/portal/$org/statements/filters"
@@ -56,7 +56,16 @@ export function StatementsTabs() {
         activeProps={{ class: "bg-secondary text-foreground" }}
         inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
       >
-        Accounts
+        Bank accounts
+      </Link>
+      <Link
+        to="/portal/$org/statements/templates"
+        params={{ org: org.slug }}
+        class={TAB}
+        activeProps={{ class: "bg-secondary text-foreground" }}
+        inactiveProps={{ class: "text-muted-foreground hover:bg-accent hover:text-accent-foreground" }}
+      >
+        Templates
       </Link>
     </nav>
   );
@@ -80,7 +89,7 @@ export function TransactionsTable(props: {
             <th class="w-32 px-4 py-2.5 font-medium">Date</th>
             <th class="px-4 py-2.5 font-medium">Description</th>
             <th class="w-32 px-4 py-2.5 text-right font-medium">Amount</th>
-            <th class="w-48 px-4 py-2.5 font-medium">Type</th>
+            <th class="w-48 px-4 py-2.5 font-medium">Category</th>
             <Show when={props.showStored}>
               <th class="w-28 px-4 py-2.5 font-medium">
                 <span class="sr-only">Status</span>
@@ -100,7 +109,7 @@ export function TransactionsTable(props: {
                 </td>
                 {/* Kept exactly as stored (trailing spaces and "_" suffixes are part of the id). */}
                 <td class="whitespace-pre-wrap break-words px-4 py-2">{t.description}</td>
-                <td class={cn("whitespace-nowrap px-4 py-2 text-right tabular-nums", isNegative(t.amount) ? "" : "text-emerald-600 dark:text-emerald-400")}>
+                <td class={cn("whitespace-nowrap px-4 py-2 text-right font-mono tabular-nums", isNegative(t.amount) ? "" : "text-emerald-600 dark:text-emerald-400")}>
                   {formatAmount(t.amount)} <span class="text-xs text-muted-foreground">{t.currency}</span>
                 </td>
                 <td class="px-4 py-2">
@@ -116,7 +125,7 @@ export function TransactionsTable(props: {
                       <select
                         value={selectValue(t.type ?? "", props.types)}
                         onChange={(e) => props.onType!(t, e.currentTarget.value || null)}
-                        aria-label="Type"
+                        aria-label="Category"
                         class={cn(
                           "h-7 min-w-0 flex-1 rounded border border-input bg-background px-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                           t.type ? "font-medium" : "text-muted-foreground",

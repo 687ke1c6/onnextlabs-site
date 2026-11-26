@@ -15,9 +15,12 @@ mod orgs;
 mod rate_limit;
 mod rbac;
 mod statement_accounts;
+mod statement_exclusions;
 mod statement_filters;
+mod statement_pdf;
 mod statement_rows;
 mod statement_splits;
+mod statement_templates;
 mod statement_types;
 mod statements;
 mod statements_google;
@@ -336,7 +339,10 @@ async fn main() {
         .merge(statement_rows::routes())
         .merge(statement_splits::routes())
         .merge(statement_filters::routes())
+        .merge(statement_pdf::routes())
+        .merge(statement_templates::routes())
         .merge(statement_accounts::routes())
+        .merge(statement_exclusions::routes())
         // Unknown API paths get a JSON 404 rather than the SPA's index.html.
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(spa)

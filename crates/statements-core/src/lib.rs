@@ -9,6 +9,7 @@ pub mod id;
 pub mod oauth;
 pub mod row;
 pub mod sb_csv;
+pub mod sb_pdf;
 pub mod sb_pdf_csv;
 pub mod statement;
 pub mod upload;

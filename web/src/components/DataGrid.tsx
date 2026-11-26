@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, type JSX, on, onCleanup, onMount, Show } from "solid-js";
 import { Dynamic, Portal } from "solid-js/web";
 import {
   type ColumnDef,
@@ -17,6 +17,7 @@ import {
 import ArrowDown from "lucide-solid/icons/arrow-down";
 import ArrowUp from "lucide-solid/icons/arrow-up";
 import ArrowUpDown from "lucide-solid/icons/arrow-up-down";
+import Blinds from "lucide-solid/icons/blinds";
 import Check from "lucide-solid/icons/check";
 import ChevronLeft from "lucide-solid/icons/chevron-left";
 import ChevronRight from "lucide-solid/icons/chevron-right";
@@ -54,6 +55,10 @@ export const SELECT =
   "h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export type FilterOption = { value: string; label: string };
+
+/** What a grid shows: every row passing its filters and search (all pages), in its order, and
+ * those filters in words (e.g. `Type: RENT or FEES`, `Search: "woolworths"`). */
+export type GridView<T> = { rows: T[]; filters: string[] };
 
 /** Per-column settings, in `columnDef.meta`. */
 export type GridColumnMeta<T> = {
@@ -114,16 +119,36 @@ export function DataGrid<T>(props: {
    * row is shown (no paging) and the grid doesn't widen the page.
    */
   statusBar?: boolean;
+  /** Extra switches for the status bar, before the grid's own (see `ToggleButton`). */
+  statusToggles?: JSX.Element;
   /** e.g. ["row", "rows"]. */
   noun: [string, string];
-  /** Clicking a row (not a control in it) calls this, e.g. to open its details. */
-  onRowClick?: (row: T) => void;
+  /**
+   * Clicking a row (not a control in it) calls this, e.g. to open its details. Clicking one of
+   * several selected rows keeps them selected and passes them as `selection`; clicking any other
+   * row clears the selection (`selection` is then empty).
+   */
+  onRowClick?: (row: T, selection: T[]) => void;
+  /** A row's identity for the drag selection, so it survives the rows being updated (default: the row object). */
+  rowKey?: (row: T) => unknown;
+  /** The rows selected by dragging (in the grid's order), each time that changes. */
+  onSelectionChange?: (rows: T[]) => void;
+  /** Controls beside the status bar's "n selected", given the selected rows (e.g. to edit them). */
+  selectionActions?: (rows: T[]) => JSX.Element;
   /** Highlights a row, e.g. the one whose details are open. */
   isSelected?: (row: T) => boolean;
   /** Extra classes for a row that isn't selected (background and hover), e.g. to mark rows with something attached. */
   rowClass?: (row: T) => string | undefined;
+  /**
+   * Bands rows by group (e.g. month): consecutive rows with the same key share a background, and
+   * the background alternates each time the key changes, in the order the grid shows them.
+   * With a status bar, a "Shading" switch there turns it on and off (on until turned off).
+   */
+  bandBy?: (row: T) => string;
   /** Extra controls at the end of the toolbar, after Columns (e.g. a page's own filter menu). */
   toolbarEnd?: JSX.Element;
+  /** Given a way to read what the grid shows (e.g. to print exactly that). */
+  viewRef?: (view: () => GridView<T>) => void;
 }) {
   const [sorting, setSorting] = createSignal<SortingState>(props.initialSorting ?? []);
   const [filters, setFilters] = createSignal<ColumnFiltersState>([]);
@@ -149,6 +174,10 @@ export function DataGrid<T>(props: {
   // sorts; off, clicking a filterable header opens its filter). Grids without a status bar sort.
   const [sortable, setSortableFlag] = props.statusBar
     ? rememberedFlag(`${props.storageKey}:sortable`, false)
+    : ([() => true, (_: boolean) => {}] as const);
+  // Banding by `bandBy` is a status-bar setting too, remembered per grid; on by default.
+  const [shaded, setShaded] = props.statusBar
+    ? rememberedFlag(`${props.storageKey}:shaded`, true)
     : ([() => true, (_: boolean) => {}] as const);
   const setSortable = (on: boolean) => {
     setSortableFlag(on);
@@ -224,12 +253,45 @@ export function DataGrid<T>(props: {
     getPaginationRowModel: getPaginationRowModel(),
   });
 
+  const pageRows = createMemo(() => table.getRowModel().rows);
+  /** Ids of the rows in every other band (see `bandBy`). */
+  const banded = createMemo(() => {
+    const out = new Set<string>();
+    const key = props.bandBy;
+    if (!key || !shaded()) return out;
+    let prev: string | undefined;
+    let on = false;
+    for (const r of pageRows()) {
+      const k = key(r.original);
+      if (prev !== undefined && k !== prev) on = !on;
+      prev = k;
+      if (on) out.add(r.id);
+    }
+    return out;
+  });
+
   const api: GridApi = {
     filterValue: <V,>(id: string, empty: V) => (filters().find((f) => f.id === id)?.value as V) ?? empty,
     setFilter: (id, value) => table.getColumn(id)?.setFilterValue(value),
   };
 
   const filtered = () => table.getFilteredRowModel().rows.map((r) => r.original);
+  props.viewRef?.(() => ({
+    rows: table.getPrePaginationRowModel().rows.map((r) => r.original),
+    filters: [
+      ...(query().trim() ? [`Search: “${query().trim()}”`] : []),
+      ...filters().flatMap((f) => {
+        const col = table.getColumn(f.id);
+        if (!col) return [];
+        const m = meta<T>(col.columnDef.meta);
+        const name = m.label ?? String(col.columnDef.header);
+        const values = Array.isArray(f.value) ? (f.value as string[]) : [String(f.value)];
+        const options = m.pick?.options(props.rows) ?? [];
+        const labels = values.map((v) => (v === EMPTY ? (m.pick?.emptyLabel ?? "blank") : (options.find((o) => o.value === v)?.label ?? v)));
+        return labels.length ? [`${name}: ${labels.join(" or ")}`] : [];
+      }),
+    ],
+  }));
   const anyFilter = () => !!query() || filters().length > 0;
   const clearAll = () => {
     setQuery("");
@@ -239,6 +301,98 @@ export function DataGrid<T>(props: {
   const count = (n: number) => `${n} ${n === 1 ? props.noun[0] : props.noun[1]}`;
   const firstShown = () => (filtered().length === 0 ? 0 : pagination().pageIndex * pagination().pageSize + 1);
   const lastShown = () => Math.min(filtered().length, (pagination().pageIndex + 1) * pagination().pageSize);
+
+  // Selecting rows by dragging over them (grids with a status bar): the status bar's figures are
+  // then for those rows. A plain click on a row, or a click anywhere outside the rows and the
+  // status bar (or anything marked `data-keeps-selection`, e.g. a panel editing the selected rows),
+  // clears it. Dragging past the top or bottom of the table scrolls it. Rows that go (deleted, or
+  // filtered out) drop out of it.
+  const keyOf = (r: T) => (props.rowKey ? props.rowKey(r) : r);
+  const [selected, setSelected] = createSignal<ReadonlySet<unknown>>(new Set());
+  const selectedRows = createMemo(
+    () => {
+      const s = selected();
+      return s.size ? table.getPrePaginationRowModel().rows.map((r) => r.original).filter((r) => s.has(keyOf(r))) : [];
+    },
+    [],
+    { equals: (a, b) => a.length === b.length && a.every((r, i) => r === b[i]) },
+  );
+  createEffect(on(selectedRows, (rows) => props.onSelectionChange?.(rows), { defer: true }));
+  const isRowSelected = (r: T) => selected().has(keyOf(r));
+  const clearSelection = () => {
+    if (selected().size) setSelected(new Set());
+  };
+  let scroller!: HTMLDivElement;
+  let head!: HTMLTableSectionElement;
+  let body!: HTMLTableSectionElement;
+  let statusBar: HTMLDivElement | undefined;
+  /** A drag in progress: where it started (row index on the page) and the pointer. */
+  let drag: { anchor: number; moved: boolean; x: number; y: number; frame: number } | null = null;
+  /** The drag just ended on another row: the click that follows isn't a row click. */
+  let dragged = false;
+  const isControl = (t: EventTarget | null) => !!(t as HTMLElement | null)?.closest("a, button, select, input, label, textarea");
+  const selectRange = (a: number, b: number) => {
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    setSelected(new Set(pageRows().slice(lo, hi + 1).map((r) => keyOf(r.original))));
+  };
+  /** The page index of the row under the pointer, its height kept within the visible rows. */
+  const rowAt = (x: number, y: number) => {
+    const box = scroller.getBoundingClientRect();
+    const top = head.getBoundingClientRect().bottom + 1;
+    const bottom = Math.min(box.bottom, body.getBoundingClientRect().bottom) - 1;
+    const left = Math.min(Math.max(x, box.left + 1), box.right - 1);
+    const tr = document.elementFromPoint(left, Math.min(Math.max(y, top), bottom))?.closest<HTMLElement>("tr[data-row]");
+    return tr && body.contains(tr) ? Number(tr.dataset.row) : null;
+  };
+  const dragStep = () => {
+    if (!drag) return;
+    const box = scroller.getBoundingClientRect();
+    const top = head.getBoundingClientRect().bottom;
+    const over = drag.y < top ? drag.y - top : drag.y > box.bottom ? drag.y - box.bottom : 0;
+    if (over) scroller.scrollTop += Math.max(-40, Math.min(40, over / 2));
+    const i = rowAt(drag.x, drag.y);
+    if (i !== null && (drag.moved || i !== drag.anchor)) {
+      drag.moved = true;
+      selectRange(drag.anchor, i);
+    }
+    drag.frame = requestAnimationFrame(dragStep);
+  };
+  const startDrag = (e: MouseEvent, index: number) => {
+    if (!props.statusBar || e.button !== 0 || isControl(e.target)) return;
+    e.preventDefault(); // no text selection while dragging
+    drag = { anchor: index, moved: false, x: e.clientX, y: e.clientY, frame: requestAnimationFrame(dragStep) };
+  };
+  const onMove = (e: MouseEvent) => {
+    if (!drag) return;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+  };
+  const onUp = () => {
+    if (!drag) return;
+    cancelAnimationFrame(drag.frame);
+    dragged = drag.moved;
+    drag = null;
+    // A click follows only when it ends on the row it started on; otherwise nothing resets this.
+    setTimeout(() => (dragged = false));
+  };
+  const onDown = (e: MouseEvent) => {
+    const t = e.target as Node;
+    if (body?.contains(t) || statusBar?.contains(t) || (t as HTMLElement).closest?.("[data-keeps-selection]")) return;
+    clearSelection();
+  };
+  if (props.statusBar) {
+    onMount(() => {
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      document.addEventListener("mousedown", onDown);
+    });
+    onCleanup(() => {
+      if (drag) cancelAnimationFrame(drag.frame);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("mousedown", onDown);
+    });
+  }
 
   return (
     // Fills the space the page leaves it (see `pageHasGrid`); only the table area scrolls.
@@ -304,14 +458,20 @@ export function DataGrid<T>(props: {
               </>
             }
             triggerClass="inline-flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            class="bottom-auto left-auto right-0 top-full mb-0 mt-1 w-48"
+            class="bottom-auto left-auto right-0 top-full mb-0 mt-1 w-56"
           >
             <For each={table.getAllLeafColumns().filter((c) => c.getCanHide())}>
               {(col) => (
-                <label class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
-                  <input type="checkbox" checked={col.getIsVisible()} onChange={col.getToggleVisibilityHandler()} class="h-4 w-4" />
-                  {meta<T>(col.columnDef.meta).label ?? String(col.columnDef.header)}
-                </label>
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={col.getIsVisible()}
+                  onClick={() => col.toggleVisibility()}
+                  class={menuItemClass}
+                >
+                  <Tick on={col.getIsVisible()} />
+                  <span class="truncate">{meta<T>(col.columnDef.meta).label ?? String(col.columnDef.header)}</span>
+                </button>
               )}
             </For>
           </Menu>
@@ -320,7 +480,7 @@ export function DataGrid<T>(props: {
       </div>
 
       {/* Table */}
-      <div class="min-h-0 flex-1 overflow-auto rounded-xl border border-border">
+      <div ref={scroller} class="min-h-0 flex-1 overflow-auto rounded-xl border border-border">
         <table
           class={cn(
             "w-full min-w-[44rem]",
@@ -331,7 +491,7 @@ export function DataGrid<T>(props: {
           )}
         >
           {/* Pinned while the rows scroll; opaque so rows don't show through. */}
-          <thead class="sticky top-0 z-10 bg-background text-left text-xs text-muted-foreground shadow-[inset_0_-1px_0_var(--color-border)]">
+          <thead ref={head} class="sticky top-0 z-10 bg-background text-left text-xs text-muted-foreground shadow-[inset_0_-1px_0_var(--color-border)]">
             <For each={table.getHeaderGroups()}>
               {(group) => (
                 <tr class="bg-secondary/30">
@@ -399,9 +559,9 @@ export function DataGrid<T>(props: {
               )}
             </For>
           </thead>
-          <tbody>
+          <tbody ref={body}>
             <For
-              each={table.getRowModel().rows}
+              each={pageRows()}
               fallback={
                 <tr>
                   <td colspan={table.getVisibleLeafColumns().length} class="px-4 py-10 text-center text-muted-foreground">
@@ -413,17 +573,27 @@ export function DataGrid<T>(props: {
                 </tr>
               }
             >
-              {(row) => (
+              {(row, i) => (
                 <tr
+                  data-row={i()}
                   class={cn(
                     "border-b border-border last:border-0",
-                    props.isSelected?.(row.original) ? "bg-accent/60" : (props.rowClass?.(row.original) ?? "hover:bg-accent/30"),
+                    isRowSelected(row.original)
+                      ? "bg-sky-500/15 hover:bg-sky-500/20 dark:bg-sky-400/20 dark:hover:bg-sky-400/25"
+                      : props.isSelected?.(row.original)
+                      ? "bg-accent/60"
+                      : (props.rowClass?.(row.original) ?? (banded().has(row.id) ? "bg-secondary hover:bg-accent" : "hover:bg-accent/30")),
                     props.onRowClick && "cursor-pointer",
                   )}
+                  onMouseDown={(e) => startDrag(e, i())}
                   onClick={(e) => {
                     // Controls in a cell (a type dropdown, a link) do their own thing.
-                    if ((e.target as HTMLElement).closest("a, button, select, input, label")) return;
-                    props.onRowClick?.(row.original);
+                    if (isControl(e.target)) return;
+                    // A drag that came back to its first row selected rows: that's not a click.
+                    if (dragged) return;
+                    const several = selectedRows().length > 1 && isRowSelected(row.original);
+                    if (!several) clearSelection();
+                    props.onRowClick?.(row.original, several ? selectedRows() : []);
                   }}
                 >
                   <For each={row.getVisibleCells()}>
@@ -456,14 +626,34 @@ export function DataGrid<T>(props: {
           to the bottom of the window, so the figures stay in view while scrolling. */}
       <Show when={props.statusBar}>
         <div
+          ref={statusBar}
           role="status"
           class="sticky bottom-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border bg-background/95 px-2 py-0.5 text-[11px] leading-5 text-muted-foreground shadow-sm backdrop-blur"
         >
           <div class="flex min-w-0 flex-wrap items-center gap-x-2.5">
-            <span class="tabular-nums">
-              {filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}
-            </span>
-            {props.status?.(filtered(), anyFilter())}
+            <Show
+              when={selectedRows().length}
+              fallback={
+                <span class="tabular-nums">
+                  {filtered().length === props.rows.length ? count(props.rows.length) : `${filtered().length} of ${count(props.rows.length)}`}
+                </span>
+              }
+            >
+              <span class="flex items-center gap-1 rounded bg-sky-500/15 pl-1.5 font-medium text-foreground tabular-nums dark:bg-sky-400/20">
+                {count(selectedRows().length)} selected
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  aria-label="Clear the selection"
+                  title="Clear the selection"
+                >
+                  <X size={11} />
+                </button>
+              </span>
+              {props.selectionActions?.(selectedRows())}
+            </Show>
+            {props.status?.(selectedRows().length ? selectedRows() : filtered(), anyFilter() || selectedRows().length > 0)}
           </div>
           <div class="flex flex-wrap items-center gap-1.5 sm:ml-auto">
             <label class="flex items-center gap-1">
@@ -483,6 +673,7 @@ export function DataGrid<T>(props: {
             </Button>
           </div>
           <div class="flex items-center gap-1 sm:border-l sm:border-border sm:pl-2">
+            {props.statusToggles}
             <ToggleButton
               label="Sort"
               hint={sortable() ? "Clicking a column header sorts by it. Turn off to filter by clicking headers instead." : "Turn on to sort by clicking column headers"}
@@ -490,6 +681,9 @@ export function DataGrid<T>(props: {
               on={sortable()}
               onChange={setSortable}
             />
+            <Show when={props.bandBy}>
+              <ToggleButton label="Shading" hint="Shade every other group of rows (e.g. month)" icon={Blinds} on={shaded()} onChange={setShaded} />
+            </Show>
             <DensityButton density={density()} onChange={setDensity} />
             <ToggleButton label="Wide" hint="Use the full width of the window" icon={MoveHorizontal} on={wideGrids()} onChange={setWideGrids} />
           </div>
@@ -526,8 +720,25 @@ function DensityButton(props: { density: Density; onChange: (d: Density) => void
   );
 }
 
+/** A menu row's checkbox (filter choices, the column picker). */
+function Tick(p: { on: boolean }) {
+  return (
+    <span
+      class={cn(
+        "flex h-4 w-4 shrink-0 items-center justify-center rounded border",
+        p.on ? "border-primary bg-primary text-primary-foreground" : "border-input",
+      )}
+    >
+      <Show when={p.on}>
+        <Check size={12} />
+      </Show>
+    </span>
+  );
+}
+
 /** A quiet on/off button for view settings: muted when off, lightly highlighted when on. */
-function ToggleButton(props: {
+/** An on/off switch for a grid's status bar. */
+export function ToggleButton(props: {
   label: string;
   hint: string;
   icon: typeof Rows3;
@@ -683,18 +894,6 @@ function HeaderFilter(props: {
       ? `Filter by ${props.name.toLowerCase()}`
       : `${props.name}: ${props.value.length > 3 ? `${props.value.length} selected` : names().join(", ")}`;
 
-  const Tick = (p: { on: boolean }) => (
-    <span
-      class={cn(
-        "flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-        p.on ? "border-primary bg-primary text-primary-foreground" : "border-input",
-      )}
-    >
-      <Show when={p.on}>
-        <Check size={12} />
-      </Show>
-    </span>
-  );
   const Choice = (o: { value: string; children: JSX.Element }) => (
     <button type="button" role="menuitemcheckbox" aria-checked={ticked(o.value)} onClick={() => toggle(o.value)} class={menuItemClass}>
       <Tick on={ticked(o.value)} />
@@ -735,27 +934,33 @@ function HeaderFilter(props: {
               aria-label={`Filter by ${props.name.toLowerCase()}`}
               onKeyDown={onKeyDown}
               style={{ top: `${p().top}px`, left: `${p().left}px` }}
-              class="fixed z-50 max-h-72 w-56 overflow-y-auto rounded-lg border border-border bg-background p-1 text-left text-sm font-normal text-foreground shadow-xl"
+              // Portalled to <body>, outside the portal's `.light` theme scope, so carry it along.
+              class={cn(
+                "fixed z-50 w-56 overflow-hidden rounded-lg border border-border bg-background text-left text-sm font-normal text-foreground shadow-xl",
+                button.closest(".light") && "light",
+              )}
             >
-              <button
-                type="button"
-                role="menuitemradio"
-                aria-checked={props.value.length === 0}
-                onClick={() => props.onChange([])}
-                class={menuItemClass}
-              >
-                <Tick on={props.value.length === 0} />
-                <span>All</span>
-              </button>
-              <Show when={props.emptyLabel}>
-                <Choice value={EMPTY}>
-                  <span class="text-muted-foreground">{props.emptyLabel}</span>
-                </Choice>
-              </Show>
-              <Show when={props.options.length > 0}>
-                <MenuSeparator />
-              </Show>
-              <For each={props.options}>{(o) => <Choice value={o.value}>{o.label}</Choice>}</For>
+              <div class="max-h-72 overflow-y-auto p-1">
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={props.value.length === 0}
+                  onClick={() => props.onChange([])}
+                  class={menuItemClass}
+                >
+                  <Tick on={props.value.length === 0} />
+                  <span>All</span>
+                </button>
+                <Show when={props.emptyLabel}>
+                  <Choice value={EMPTY}>
+                    <span class="text-muted-foreground">{props.emptyLabel}</span>
+                  </Choice>
+                </Show>
+                <Show when={props.options.length > 0}>
+                  <MenuSeparator />
+                </Show>
+                <For each={props.options}>{(o) => <Choice value={o.value}>{o.label}</Choice>}</For>
+              </div>
             </div>
           </Portal>
         )}

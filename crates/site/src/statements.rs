@@ -4,7 +4,8 @@
 //! saved as an *upload*. Its rows are stored once per `(account, row id)` and linked to every
 //! upload that contained them, so saving a statement again (or the same rows in another format)
 //! updates rows instead of duplicating them. A save never blanks a type: when no rule matches,
-//! the stored type is kept.
+//! the stored type is kept. Lines the account's upload exclusions match (`statement_exclusions`)
+//! are left out: the preview lists them, and saving never stores them.
 //!
 //! The row id (`txn_id`) is a hash of the date, amount, normalised description and occurrence
 //! (statements-core `id.rs`): it's also what the Google Sheets copy is keyed on
@@ -39,6 +40,7 @@ use statements_core::{
 };
 
 use crate::statement_accounts::{self, Account};
+use crate::statement_exclusions::{account_exclusions, take_excluded, Exclusion};
 
 use crate::{
     api::{bad_request, db_error, error, not_found},
@@ -55,7 +57,7 @@ const STATEMENTS_FOLDER: &str = "Statements";
 
 /// `Statements/<account>` (or `Statements/No account`). Account numbers are digits in practice;
 /// anything that isn't safe as a folder name is replaced.
-fn statement_folder(account: &str) -> String {
+pub(crate) fn statement_folder(account: &str) -> String {
     let name: String = account
         .trim()
         .chars()
@@ -122,6 +124,7 @@ pub fn routes(max_bytes: u64) -> Router<Arc<AppState>> {
             post(preview).layer(DefaultBodyLimit::max(body_limit)),
         )
         .route("/api/orgs/{org}/statements/{id}", get(show).delete(remove))
+        .route("/api/statement-formats", get(formats))
         .route(
             "/api/orgs/{org}/statements/{id}/delete-impact",
             get(delete_preview),
@@ -176,7 +179,7 @@ async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadFor
                 account = Some(
                     text.trim()
                         .parse()
-                        .map_err(|_| bad_request("Unknown account."))?,
+                        .map_err(|_| bad_request("Unknown bank account."))?,
                 );
             }
             _ => {}
@@ -189,10 +192,11 @@ async fn read_form(mut multipart: Multipart, max_bytes: u64) -> Result<UploadFor
     if bytes.is_empty() {
         return Err(bad_request("The file is empty."));
     }
-    if !filename.to_ascii_lowercase().ends_with(".csv") {
+    let lower = filename.to_ascii_lowercase();
+    if !lower.ends_with(".csv") && !lower.ends_with(".pdf") {
         return Err(error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "Only CSV statements are supported for now.",
+            "Statements are CSV or PDF files.",
         ));
     }
     Ok(UploadForm {
@@ -215,7 +219,7 @@ async fn read_picks(
         return Ok(Picks::new());
     };
     let wanted: HashMap<String, Option<String>> =
-        serde_json::from_str(raw).map_err(|_| bad_request("The chosen types couldn't be read."))?;
+        serde_json::from_str(raw).map_err(|_| bad_request("The chosen categories couldn't be read."))?;
     let ids: HashSet<i64> = st.transactions.iter().map(|t| t.id).collect();
     let mut picks = Picks::new();
     for (key, name) in wanted {
@@ -224,7 +228,7 @@ async fn read_picks(
             .ok()
             .filter(|id| ids.contains(id))
             .ok_or_else(|| {
-                bad_request("A chosen type is for a row that isn't in this statement.")
+                bad_request("A chosen category is for a row that isn't in this statement.")
             })?;
         let name = match name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
             None => None,
@@ -232,7 +236,7 @@ async fn read_picks(
                 crate::statement_types::canonical_name(db, org_id, n)
                     .await
                     .map_err(db_error)?
-                    .ok_or_else(|| bad_request(&format!("{n:?} isn't on the types list.")))?,
+                    .ok_or_else(|| bad_request(&format!("{n:?} isn't on the categories list.")))?,
             ),
         };
         picks.insert(id, name);
@@ -243,12 +247,16 @@ async fn read_picks(
 /// Types the file itself gives, by row id (`googlesheet_csv`'s `type` column), as written.
 type FileTypes = HashMap<i64, String>;
 
-/// Detects the format, parses, assigns the row ids and applies the type rules. Rules only fill rows the
-/// file didn't give a type; those are returned separately, as they're saved as hand-set.
+/// Detects the format, parses, assigns the row ids, takes out the lines `exclusions` match
+/// (returned, in file order) and applies the type rules. Rules only fill rows the file didn't
+/// give a type; those are returned separately, as they're saved as hand-set.
+///
+/// Row ids are assigned before excluding, so a line's id never depends on what's excluded.
 fn parse_statement(
     bytes: &[u8],
     rules: &[CategoryRule],
-) -> Result<(Statement, FileTypes), Response> {
+    exclusions: &[Exclusion],
+) -> Result<(Statement, FileTypes, Vec<Transaction>), Response> {
     let mut statement = statement::parse(bytes).map_err(|e| {
         error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -261,13 +269,14 @@ fn parse_statement(
             "This statement has no transactions.",
         ));
     }
+    let excluded = take_excluded(&mut statement, exclusions);
     let file_types = statement
         .transactions
         .iter()
         .filter_map(|t| Some((t.id, t.category.clone()?)))
         .collect();
     categorise(rules, &mut statement);
-    Ok((statement, file_types))
+    Ok((statement, file_types, excluded))
 }
 
 /// The file's types as they'd be saved: each in the types list's spelling, except on rows whose
@@ -331,7 +340,7 @@ fn stated_account(statement: &Statement) -> String {
 async fn target_account(db: &Db, org_id: i64, form: &UploadForm) -> Result<Account, Response> {
     let id = form
         .account
-        .ok_or_else(|| bad_request("Choose the account this statement is for."))?;
+        .ok_or_else(|| bad_request("Choose the bank account this statement is for."))?;
     statement_accounts::find(db, org_id, id).await
 }
 
@@ -375,7 +384,7 @@ struct Preview {
     suggested_account: Option<Account>,
     first_date: Option<String>,
     last_date: Option<String>,
-    /// Rows in the file.
+    /// Rows that will be saved (the file's, less the excluded ones).
     rows: usize,
     /// Rows a type rule matched.
     typed: usize,
@@ -383,6 +392,8 @@ struct Preview {
     new: usize,
     existing: usize,
     transactions: Vec<PreviewRow>,
+    /// Lines the account's upload exclusions leave out, in file order: never saved.
+    excluded: Vec<ExcludedRow>,
     /// Formats that state their rows' ids (`googlesheet_csv`): how they compare with the ids
     /// computed from the rows.
     id_check: Option<IdCheck>,
@@ -392,6 +403,18 @@ struct Preview {
     documents_folder: String,
     /// ...unless this exact file is already there, in which case that one is used.
     existing_document: Option<ExistingDocument>,
+}
+
+/// A line of the file an upload exclusion leaves out.
+#[derive(Serialize)]
+struct ExcludedRow {
+    txn_id: i64,
+    date: String,
+    amount: String,
+    description: String,
+    currency: String,
+    /// Saved before the exclusion existed: it stays until deleted (from Uploads › Upload exclusions).
+    stored: bool,
 }
 
 #[derive(Serialize)]
@@ -423,7 +446,8 @@ async fn preview(
     let form = read_form(multipart, state.max_upload_bytes).await?;
     let account = target_account(&state.db, org.id, &form).await?;
     let rules = account_rules(&state.db, account.id).await?;
-    let (st, file_types) = parse_statement(&form.bytes, &rules)?;
+    let exclusions = account_exclusions(&state.db, account.id).await?;
+    let (st, file_types, excluded) = parse_statement(&form.bytes, &rules, &exclusions)?;
     let stored = stored_types(&state.db, account.id).await?;
     let (file_picks, new_types) =
         file_picks(&state.db, org.id, &file_types, &stored, false).await?;
@@ -453,8 +477,9 @@ async fn preview(
         format: st.format.id(),
         format_name: st.format.description(),
         account_number: st.account_number.clone(),
-        first_date: txs.iter().map(|t| &t.date).min().cloned(),
-        last_date: txs.iter().map(|t| &t.date).max().cloned(),
+        // The period the file covers, excluded lines included.
+        first_date: txs.iter().chain(&excluded).map(|t| &t.date).min().cloned(),
+        last_date: txs.iter().chain(&excluded).map(|t| &t.date).max().cloned(),
         rows: txs.len(),
         typed: txs.iter().filter(|t| effective(t).0.is_some()).count(),
         new: txs.len() - existing,
@@ -474,6 +499,17 @@ async fn preview(
                     stored: stored.contains_key(&t.id),
                     effective_date: t.effective_date.clone(),
                 }
+            })
+            .collect(),
+        excluded: excluded
+            .iter()
+            .map(|t| ExcludedRow {
+                txn_id: t.id,
+                date: t.date.clone(),
+                amount: t.amount.clone(),
+                description: t.description.clone(),
+                currency: t.currency.clone(),
+                stored: stored.contains_key(&t.id),
             })
             .collect(),
         id_check: st.id_check.clone(),
@@ -520,7 +556,14 @@ async fn save(
     // A mismatch with the account's identifier is shown in the preview, never refused here.
     let account = target_account(&state.db, org.id, &form).await?;
     let rules = account_rules(&state.db, account.id).await?;
-    let (st, file_types) = parse_statement(&form.bytes, &rules)?;
+    let exclusions = account_exclusions(&state.db, account.id).await?;
+    let (st, file_types, excluded) = parse_statement(&form.bytes, &rules, &exclusions)?;
+    if st.transactions.is_empty() {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Every line of this statement is excluded by the bank account's upload exclusions, so there's nothing to save.",
+        ));
+    }
     let user_picks = read_picks(&state.db, org.id, form.types.as_deref(), &st).await?;
     let picks = save_picks(&state.db, org.id, account.id, &file_types, user_picks).await?;
     let sha256 = hex::encode(Sha256::digest(&form.bytes));
@@ -536,7 +579,14 @@ async fn save(
                 user.id,
                 &statement_folder(&account.name),
                 &form.filename,
-                Some("text/csv".into()),
+                Some(
+                    if st.format.is_pdf() {
+                        "application/pdf"
+                    } else {
+                        "text/csv"
+                    }
+                    .into(),
+                ),
                 form.bytes.clone(),
                 false,
             )
@@ -566,6 +616,7 @@ async fn save(
         rows = detail.upload.rows_parsed,
         new = detail.upload.rows_new,
         updated = detail.upload.rows_updated,
+        excluded = excluded.len(),
         user = user.id,
         "statement saved"
     );
@@ -644,7 +695,8 @@ async fn store(
 /// One database transaction: the upload row, then each statement row upserted on
 /// `(account, row id)` and linked to the upload in file order.
 ///
-/// An effective date in the file is stored; a row without one keeps any it has. A row stays
+/// An effective date in the file is stored; a row without one keeps any it has. A PDF never
+/// changes the description or amount text of a row already saved (see `keep_text`). A row stays
 /// hand-added (deletable) only while no statement that isn't hand-added contains it.
 ///
 /// Types: a type picked in the preview (`picks`) is stored as hand-set; clearing one there
@@ -668,6 +720,10 @@ async fn store_with(
     let ids: BTreeSet<i64> = st.transactions.iter().map(|t| t.id).collect();
     let ids_json = serde_json::to_string(&ids).expect("ids serialise");
     let parsed = st.transactions.len() as i64;
+
+    // A PDF's text is rebuilt to give the same ids as the bank's CSV export, but it can still read a little
+    // differently (runs of spaces, `-3.50` for `-3.5`): rows already saved keep their own text.
+    let keep_text = st.format.is_pdf();
 
     let mut batch = db::Batch::new();
     let upload = batch.push(
@@ -702,8 +758,10 @@ async fn store_with(
                       type_manual, effective_date, occurrence, hand_added)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (account_id, txn_id) DO UPDATE SET
-                     date = excluded.date, amount = excluded.amount,
-                     description = excluded.description, currency = excluded.currency,
+                     date = excluded.date,
+                     amount = CASE WHEN ? THEN amount ELSE excluded.amount END,
+                     description = CASE WHEN ? THEN description ELSE excluded.description END,
+                     currency = excluded.currency,
                      type = excluded.type, type_manual = excluded.type_manual,
                      effective_date = coalesce(excluded.effective_date, effective_date),
                      hand_added = min(hand_added, excluded.hand_added),
@@ -721,6 +779,8 @@ async fn store_with(
                     t.effective_date.clone(),
                     t.occurrence,
                     t.hand_added,
+                    keep_text,
+                    keep_text,
                 ],
             ),
             // From the rules: a hand-set type is never changed, and a blank never replaces one.
@@ -730,8 +790,10 @@ async fn store_with(
                       type_manual, effective_date, occurrence, hand_added)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                  ON CONFLICT (account_id, txn_id) DO UPDATE SET
-                     date = excluded.date, amount = excluded.amount,
-                     description = excluded.description, currency = excluded.currency,
+                     date = excluded.date,
+                     amount = CASE WHEN ? THEN amount ELSE excluded.amount END,
+                     description = CASE WHEN ? THEN description ELSE excluded.description END,
+                     currency = excluded.currency,
                      type = CASE WHEN type_manual = 1 THEN type ELSE coalesce(excluded.type, type) END,
                      effective_date = coalesce(excluded.effective_date, effective_date),
                      hand_added = min(hand_added, excluded.hand_added),
@@ -748,6 +810,8 @@ async fn store_with(
                     t.effective_date.clone(),
                     t.occurrence,
                     t.hand_added,
+                    keep_text,
+                    keep_text,
                 ],
             ),
         };
@@ -777,6 +841,9 @@ async fn store_with(
 pub struct UploadSummary {
     pub id: i64,
     pub format: String,
+    /// The format's name, e.g. "Standard Bank PDF statement (2026-01 layout)" (not stored: from `format`).
+    #[serde(default)]
+    pub format_name: String,
     /// The account it was saved into.
     pub account_id: i64,
     pub account_name: String,
@@ -836,7 +903,6 @@ pub struct StoredTransaction {
 pub struct UploadDetail {
     #[serde(flatten)]
     pub upload: UploadSummary,
-    pub format_name: &'static str,
     pub transactions: Vec<StoredTransaction>,
 }
 
@@ -863,7 +929,36 @@ async fn list(
     .fetch_all(&state.db)
     .await
     .map_err(db_error)?;
-    Ok(Json(uploads))
+    Ok(Json(uploads.into_iter().map(named).collect()))
+}
+
+/// The upload with its format's name filled in.
+fn named(mut u: UploadSummary) -> UploadSummary {
+    u.format_name = Format::from_id(&u.format)
+        .map_or("Unknown format", Format::description)
+        .to_string();
+    u
+}
+
+#[derive(Serialize)]
+struct FormatInfo {
+    id: &'static str,
+    name: &'static str,
+    pdf: bool,
+}
+
+/// GET /api/statement-formats — the statement formats uploads can be in.
+async fn formats(_user: CurrentUser) -> Json<Vec<FormatInfo>> {
+    Json(
+        Format::ALL
+            .into_iter()
+            .map(|f| FormatInfo {
+                id: f.id(),
+                name: f.description(),
+                pdf: f.is_pdf(),
+            })
+            .collect(),
+    )
 }
 
 /// GET /api/orgs/{org}/statements/{id} — one upload with every row it contained.
@@ -895,10 +990,8 @@ pub async fn upload_detail(db: &Db, org_id: i64, id: i64) -> Result<UploadDetail
     .fetch_all(db)
     .await
     .map_err(db_error)?;
-    let format_name = Format::from_id(&upload.format).map_or("Unknown format", Format::description);
     Ok(UploadDetail {
-        upload,
-        format_name,
+        upload: named(upload),
         transactions,
     })
 }
@@ -1118,7 +1211,7 @@ pub struct RuleJson {
 impl RuleJson {
     fn to_rule(&self) -> Result<CategoryRule, String> {
         if self.category.chars().count() > MAX_RULE_TEXT_CHARS {
-            return Err("the type is too long".into());
+            return Err("the category is too long".into());
         }
         if self.contains.len() > MAX_NEEDLES_PER_RULE {
             return Err(format!("at most {MAX_NEEDLES_PER_RULE} texts to look for"));
@@ -1242,7 +1335,7 @@ async fn put_rules(
             .map_err(db_error)?
             .ok_or_else(|| {
                 bad_request(&format!(
-                    "Rule {}: {:?} isn't on the types list. Add it first.",
+                    "Rule {}: {:?} isn't on the categories list. Add it first.",
                     i + 1,
                     r.category.trim()
                 ))
@@ -1496,6 +1589,7 @@ mod tests {
             id: 1,
             name: "Joint".into(),
             identifier: identifier.map(Into::into),
+            ..Account::default()
         };
         assert_eq!(
             check_account(&account(Some("123")), "123"),
@@ -1575,9 +1669,34 @@ mod tests {
         include_bytes!("../../statements-core/tests/fixtures/sb_csv_synthetic.csv");
 
     fn parsed(rules: &[RuleJson]) -> Statement {
-        parse_statement(SYNTHETIC, &validate_rules(rules).unwrap())
+        parse_statement(SYNTHETIC, &validate_rules(rules).unwrap(), &[])
             .unwrap()
             .0
+    }
+
+    #[test]
+    fn excluded_lines_are_taken_out_and_other_ids_dont_change() {
+        let all = parsed(&[]);
+        let exclusion: crate::statement_exclusions::RuleJson = serde_json::from_value(
+            serde_json::json!({ "contains": ["monthly fee", "service fee"] }),
+        )
+        .unwrap();
+        let rules = vec![crate::statement_exclusions::tests_check(&exclusion)];
+        let (kept, _, excluded) = parse_statement(SYNTHETIC, &[], &rules).unwrap();
+        assert_eq!(excluded.len(), 2);
+        assert!(excluded.iter().all(|t| t.description.contains("FEE")));
+        assert_eq!(kept.transactions.len() + 2, all.transactions.len());
+        let kept_ids: Vec<i64> = kept.transactions.iter().map(|t| t.id).collect();
+        let expected: Vec<i64> = all
+            .transactions
+            .iter()
+            .filter(|t| {
+                !t.description.contains("FIXED MONTHLY FEE")
+                    && !t.description.contains("OVERDRAFT SERVICE FEE")
+            })
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(kept_ids, expected);
     }
 
     async fn count(db: &Db, sql: &'static str) -> i64 {
@@ -1969,7 +2088,7 @@ mod tests {
         let accounts = statement_accounts::org_accounts(&db, org.id).await.unwrap();
         let summary: Vec<(&str, i64, i64)> = accounts
             .iter()
-            .map(|a| (a.name.as_str(), a.uploads, a.rows))
+            .map(|a| (a.account.name.as_str(), a.uploads, a.rows))
             .collect();
         // By name.
         assert_eq!(summary, [("123456789", 1, n as i64), ("999", 1, 3)]);
@@ -2031,7 +2150,8 @@ mod tests {
         rules: &[RuleJson],
         user_picks: Picks,
     ) -> Statement {
-        let (st, file_types) = parse_statement(SHEET, &validate_rules(rules).unwrap()).unwrap();
+        let (st, file_types, _) =
+            parse_statement(SHEET, &validate_rules(rules).unwrap(), &[]).unwrap();
         let picks = save_picks(db, org.id, account, &file_types, user_picks)
             .await
             .unwrap();
@@ -2153,6 +2273,47 @@ mod tests {
             .filter_map(|r| r.effective_date.as_deref())
             .collect();
         assert_eq!(dated, ["2028-02-29", "2028-01-31"]);
+    }
+
+    #[tokio::test]
+    async fn a_pdf_statement_keeps_the_saved_text_of_rows_already_saved() {
+        let (db, org, user) = test_db().await;
+        let account = test_account(&db, org.id, "").await;
+        let st = save_sheet(&db, &org, user, account, &[], Picks::new()).await;
+        let before = org_transactions(&db, org.id, Some(account)).await.unwrap();
+
+        // The same rows (same ids) as a PDF reads them: other text, one new row.
+        let mut pdf = st.clone();
+        pdf.format = Format::SbPdf2026_01;
+        for t in &mut pdf.transactions {
+            t.description = format!("{}  (as the PDF reads it)", t.description);
+            t.amount = format!("{}0", t.amount);
+        }
+        let mut new = pdf.transactions[0].clone();
+        new.id = 999;
+        new.description = "NEW FROM THE PDF".into();
+        pdf.transactions.push(new);
+        store_with(
+            &db,
+            &org,
+            account,
+            user,
+            "s.pdf",
+            "p",
+            &pdf,
+            None,
+            &Picks::new(),
+        )
+        .await
+        .unwrap();
+
+        let after = org_transactions(&db, org.id, Some(account)).await.unwrap();
+        assert_eq!(after.len(), before.len() + 1);
+        for b in &before {
+            let a = after.iter().find(|r| r.id == b.id).unwrap();
+            assert_eq!((&a.description, &a.amount), (&b.description, &b.amount));
+        }
+        assert!(after.iter().any(|r| r.description == "NEW FROM THE PDF"));
     }
 
     #[tokio::test]

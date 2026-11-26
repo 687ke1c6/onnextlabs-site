@@ -35,6 +35,8 @@ const UploadsPage = lazyRouteComponent(() => import("~/routes/portal/org/Stateme
 const StatementDetailPage = lazyRouteComponent(() => import("~/routes/portal/org/StatementDetail"), "StatementDetailPage");
 const TypeRulesPage = lazyRouteComponent(() => import("~/routes/portal/org/TypeRules"), "TypeRulesPage");
 const AccountsPage = lazyRouteComponent(() => import("~/routes/portal/org/Accounts"), "AccountsPage");
+const TemplateEditorPage = lazyRouteComponent(() => import("~/routes/portal/org/TemplateEditor"), "TemplateEditorPage");
+const TemplatesPage = lazyRouteComponent(() => import("~/routes/portal/org/Templates"), "TemplatesPage");
 const QuickFiltersPage = lazyRouteComponent(() => import("~/routes/portal/org/QuickFilters"), "QuickFiltersPage");
 
 // /portal                      your organisations (PortalLayout: session, org list, rail)
@@ -46,10 +48,12 @@ const QuickFiltersPage = lazyRouteComponent(() => import("~/routes/portal/org/Qu
 // /portal/<org>                an org's dashboard (OrgLayout: resolves the slug)
 // /portal/<org>/documents      its document store (read-docs; uploading needs write-docs)
 // /portal/<org>/statements     every saved transaction (read-statements)
-// /portal/<org>/statements/uploads   saved statement files; uploading needs write-statements
+// /portal/<org>/statements/uploads   saved statement files and upload exclusions; uploading needs write-statements
 // /portal/<org>/statements/rules     the account's type rules (editing needs write-statements)
 // /portal/<org>/statements/accounts  accounts (changes need write-statements)
 // /portal/<org>/statements/filters   quick filters for the grid (editing needs write-statements)
+// /portal/<org>/statements/templates the org's statement PDF templates (editing needs write-statements)
+// /portal/<org>/statements/templates/<id>  designing one
 // /portal/<org>/statements/<id>      one saved statement
 // Static segments win over $org, and the server reserves those names as slugs.
 // What's shown here is cosmetic: the API enforces access.
@@ -80,6 +84,12 @@ const orgStatementsRoute = createRoute({ getParentRoute: () => orgRoute, path: "
 const orgUploadsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/uploads", component: UploadsPage });
 const orgTypeRulesRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/rules", component: TypeRulesPage });
 const orgAccountsRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/accounts", component: AccountsPage });
+const orgTemplatesRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/templates", component: TemplatesPage });
+const orgTemplateEditorRoute = createRoute({
+  getParentRoute: () => orgRoute,
+  path: "statements/templates/$template",
+  component: TemplateEditorPage,
+});
 const orgQuickFiltersRoute = createRoute({ getParentRoute: () => orgRoute, path: "statements/filters", component: QuickFiltersPage });
 const orgStatementRoute = createRoute({
   getParentRoute: () => orgRoute,
@@ -106,6 +116,8 @@ export const router = createRouter({
         orgTypeRulesRoute,
         orgAccountsRoute,
         orgQuickFiltersRoute,
+        orgTemplatesRoute,
+        orgTemplateEditorRoute,
         orgStatementRoute,
       ]),
     ]),

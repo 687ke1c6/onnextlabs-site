@@ -13,7 +13,9 @@ import { DataGrid, distinct, type GridColumnMeta, pickFilter } from "~/component
 import { Button } from "~/components/ui/button";
 import { can } from "~/lib/orgs";
 import {
+  fetchFormats,
   fetchUploads,
+  formatAmount,
   formatDate,
   formatPeriod,
   fetchTypes,
@@ -28,6 +30,7 @@ import {
 import { cn, settled } from "~/lib/utils";
 import { Allowed } from "~/routes/portal/Layout";
 import { Coverage } from "~/routes/portal/org/Coverage";
+import { ExclusionsSection } from "~/routes/portal/org/Exclusions";
 import { useOrg } from "~/routes/portal/org/OrgLayout";
 import { Fact, TransactionsTable } from "~/routes/portal/org/StatementParts";
 import { type AccountState, StatementsShell } from "~/routes/portal/org/StatementsShell";
@@ -55,7 +58,7 @@ function AccountCheckBanner(props: {
     try {
       await props.onSetIdentifier(stated());
     } catch (e) {
-      setSetError(errorText(e, "Couldn't save the account."));
+      setSetError(errorText(e, "Couldn't save the bank account."));
     } finally {
       setSetting(false);
     }
@@ -82,7 +85,7 @@ function AccountCheckBanner(props: {
             </p>
             <Show
               when={p().suggested_account}
-              fallback={<p class="mt-1 text-muted-foreground">You can still save it here; check it's the right account first.</p>}
+              fallback={<p class="mt-1 text-muted-foreground">You can still save it here; check it's the right bank account first.</p>}
             >
               {(other) => (
                 <div class="mt-2 flex flex-wrap items-center gap-2">
@@ -138,7 +141,7 @@ function AccountCheckBanner(props: {
       <Match when={p().account_check === "not_stated"}>
         <p class="mt-4 flex items-start gap-2 rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">
           <Info size={16} class="mt-0.5 shrink-0" />
-          <span>This statement doesn't state an account number, so it can't be checked against the account.</span>
+          <span>This statement doesn't state an account number, so it can't be checked against the bank account.</span>
         </p>
       </Match>
     </Switch>
@@ -187,8 +190,8 @@ function IdCheckBanner(props: { check: IdCheck; newTypes: string[] }) {
           </p>
         </Show>
         <p class="text-muted-foreground">
-          Types from the sheet are saved as set by hand
-          <Show when={props.newTypes.length}>, and {props.newTypes.join(", ")} will be added to the types list</Show>.
+          Categories from the sheet are saved as set by hand
+          <Show when={props.newTypes.length}>, and {props.newTypes.join(", ")} will be added to the categories list</Show>.
         </p>
       </div>
     </div>
@@ -203,6 +206,8 @@ function UploadPanel(props: {
   onAccountChanged: () => void;
   /** The account's saved statements, for the coverage timeline. */
   uploads: () => AccountUploads | undefined;
+  /** Changes when the exclusions are saved: an open statement is previewed again. */
+  exclusionsVersion: () => number;
 }) {
   const org = useOrg();
   const navigate = useNavigate();
@@ -213,6 +218,7 @@ function UploadPanel(props: {
   // Types picked in the preview, by row id (null = cleared). Saved as hand-set.
   const [picks, setPicks] = createSignal<Record<number, string | null>>({});
   const [types] = createResource(() => org.slug, fetchTypes);
+  const [formats] = createResource(fetchFormats);
   const typeNames = () => (settled(types) ?? []).map((t) => t.name);
   // The preview's rows with the picks applied, as they'll be saved.
   const shownRows = createMemo(() => {
@@ -260,6 +266,18 @@ function UploadPanel(props: {
   createEffect(
     on(
       () => props.account().id,
+      () => {
+        const f = file();
+        if (f && preview()) void read(f);
+      },
+      { defer: true },
+    ),
+  );
+
+  // Exclusions saved with a statement open: preview it again, to leave out what they now match.
+  createEffect(
+    on(
+      props.exclusionsVersion,
       () => {
         const f = file();
         if (f && preview()) void read(f);
@@ -330,7 +348,20 @@ function UploadPanel(props: {
                   <>
                     <UploadCloud size={28} class="text-muted-foreground" />
                     <span class="text-sm font-medium">Drop a bank statement here, or click to choose</span>
-                    <span class="text-xs text-muted-foreground">CSV only for now: Standard Bank CSV exports, Standard Bank PDF statements converted to CSV, or a Google Sheet of statement rows downloaded as CSV. Nothing is saved until you confirm.</span>
+                    <span class="text-xs text-muted-foreground">CSV or PDF. Nothing is saved until you confirm.</span>
+                    <Show when={settled(formats)}>
+                      {(list) => (
+                        <span class="mt-1 flex flex-wrap justify-center gap-1.5">
+                          <For each={list()}>
+                            {(f) => (
+                              <span class="rounded-full border border-border bg-background px-2 py-0.5 text-[11px] text-muted-foreground" title={f.id}>
+                                {f.name}
+                              </span>
+                            )}
+                          </For>
+                        </span>
+                      )}
+                    </Show>
                   </>
                 }
               >
@@ -341,7 +372,7 @@ function UploadPanel(props: {
             <input
               ref={fileInput}
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,text/csv,.pdf,application/pdf"
               class="hidden"
               onChange={(e) => void pick(e.currentTarget.files)}
             />
@@ -374,7 +405,7 @@ function UploadPanel(props: {
               <Fact label="Format" value={p().format_name} />
               <Fact label="Account in the file" value={p().account_number ?? "Not stated"} />
               <Fact label="Period" value={formatPeriod(p().first_date, p().last_date)} />
-              <Fact label="Rows" value={`${p().rows} (${shownRows().filter((t) => t.type).length} typed)`} />
+              <Fact label="Rows" value={`${p().rows} (${shownRows().filter((t) => t.type).length} categorised)`} />
             </dl>
             <Show when={props.uploads()?.account === p().account.id ? props.uploads() : undefined}>
               {(saved) => (
@@ -398,8 +429,35 @@ function UploadPanel(props: {
               .
             </p>
 
+            <Show when={p().excluded.length > 0}>
+              <details class="mt-3 rounded-lg border border-border p-3 text-sm">
+                <summary class="cursor-pointer text-muted-foreground">
+                  <span class="font-medium text-foreground">
+                    {p().excluded.length} {p().excluded.length === 1 ? "line" : "lines"} left out
+                  </span>{" "}
+                  by {p().account.name}'s upload exclusions: {p().excluded.length === 1 ? "it isn't" : "they aren't"} saved.
+                </summary>
+                <ul class="mt-2 flex flex-col gap-1">
+                  <For each={p().excluded}>
+                    {(t) => (
+                      <li class="flex items-baseline gap-3 text-muted-foreground">
+                        <span class="w-24 shrink-0 whitespace-nowrap">{formatDate(t.date)}</span>
+                        <span class="min-w-0 flex-1 whitespace-pre-wrap break-words line-through decoration-muted-foreground/50">{t.description}</span>
+                        <span class="shrink-0 whitespace-nowrap font-mono tabular-nums">{formatAmount(t.amount)}</span>
+                        <Show when={t.stored}>
+                          <span class="shrink-0 text-xs text-amber-600 dark:text-amber-400" title="Saved before the exclusion existed: it stays until deleted. Use ▶ on the exclusion below to see and delete saved rows it matches.">
+                            saved earlier
+                          </span>
+                        </Show>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </details>
+            </Show>
+
             <p class="mt-3 text-xs text-muted-foreground">
-              Change any row's type below before saving. A type you pick here is set by hand: later saves won't change it.
+              Change any row's category below before saving. A category you pick here is set by hand: later saves won't change it.
             </p>
             <div class="mt-2 max-h-[28rem] overflow-y-auto">
               <TransactionsTable
@@ -439,7 +497,7 @@ function UploadPanel(props: {
               <Button variant="ghost" onClick={reset} disabled={!!busy()}>
                 Discard
               </Button>
-              <Button onClick={save} disabled={!!busy()}>
+              <Button onClick={save} disabled={!!busy() || p().rows === 0} title={p().rows === 0 ? "Every line is excluded: nothing to save" : undefined}>
                 <Show when={busy() === "saving"}>
                   <Loader2 size={16} class="animate-spin" />
                 </Show>
@@ -487,6 +545,18 @@ const uploadColumns: ColumnDef<UploadSummary, any>[] = [
       <span class="whitespace-nowrap text-muted-foreground">{formatPeriod(c.row.original.first_date, c.row.original.last_date)}</span>
     ),
     meta: { width: "w-56" } satisfies UploadMeta,
+  },
+  {
+    id: "format",
+    accessorFn: (u) => u.format_name,
+    header: "Format",
+    cell: (c) => (
+      <span class="whitespace-nowrap text-muted-foreground" title={c.row.original.format}>
+        {c.row.original.format_name}
+      </span>
+    ),
+    filterFn: pickFilter,
+    meta: { width: "w-64", pick: { options: (rows) => distinct(rows, (u) => u.format_name) } } satisfies UploadMeta,
   },
   {
     accessorKey: "rows_parsed",
@@ -599,12 +669,14 @@ function Uploads() {
     <StatementsShell fill>
       {(acct, account) => {
         const uploads = useAccountUploads(acct);
+        const [exclusionsVersion, setExclusionsVersion] = createSignal(0);
         return (
           <>
             <Show when={can(org, "write-statements")}>
               <UploadPanel
                 account={account}
                 uploads={uploads.current}
+                exclusionsVersion={exclusionsVersion}
                 onSwitch={(id) => acct.pick(id)}
                 onAccountChanged={() => acct.reload()}
                 onSaved={(id) => {
@@ -613,6 +685,7 @@ function Uploads() {
                 }}
               />
             </Show>
+            <ExclusionsSection account={account()} onChanged={() => setExclusionsVersion((v) => v + 1)} />
             <UploadsList uploads={uploads} />
           </>
         );

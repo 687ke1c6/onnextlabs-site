@@ -239,6 +239,55 @@ fn unrecorded<'a>(stored: &'a [FileInfo], documents: &[Document]) -> Vec<&'a Fil
         .collect()
 }
 
+/// A document of the org: (folder, filename), or None.
+pub async fn find_in_org(
+    db: &crate::db::Db,
+    org_id: i64,
+    id: i64,
+) -> Result<Option<(String, String)>, Response> {
+    #[derive(Deserialize)]
+    struct Found {
+        folder: String,
+        filename: String,
+    }
+    let found: Option<Found> =
+        db::query_as("SELECT folder, filename FROM documents WHERE id = ? AND org_id = ?")
+            .bind(id)
+            .bind(org_id)
+            .fetch_optional(db)
+            .await
+            .map_err(crate::api::db_error)?;
+    Ok(found.map(|f| (f.folder, f.filename)))
+}
+
+/// A document's whole file, read from storage (at most `max` bytes). For server-side use, e.g.
+/// a logo in a statement PDF; the caller checks permissions.
+pub async fn read_bytes(
+    state: &AppState,
+    org: &Org,
+    folder: &str,
+    filename: &str,
+    max: usize,
+) -> Result<axum::body::Bytes, Response> {
+    let path = folder_path(org, folder)?
+        .join(filename)
+        .map_err(|_| bad_request("Invalid file name."))?;
+    let blob = state
+        .storage
+        .get(&path, None)
+        .await
+        .map_err(crate::api::storage_error)?;
+    if blob.total > max as u64 {
+        return Err(bad_request(&format!(
+            "{filename} is too large (at most {} MB).",
+            max / (1024 * 1024)
+        )));
+    }
+    axum::body::to_bytes(blob.body, max)
+        .await
+        .map_err(|_| bad_request(&format!("{filename} couldn't be read.")))
+}
+
 /// Whether a document's file is in storage. Storage errors count as "don't know" (true), so a
 /// storage blip doesn't flag every document as missing.
 pub async fn file_exists(state: &AppState, org: &Org, folder: &str, filename: &str) -> bool {
@@ -684,7 +733,7 @@ fn numbered(filename: &str, n: u32) -> String {
 }
 
 /// RFC 6266: an ASCII fallback plus the exact UTF-8 name.
-fn content_disposition(filename: &str) -> String {
+pub(crate) fn content_disposition(filename: &str) -> String {
     let fallback: String = filename
         .chars()
         .map(|c| {

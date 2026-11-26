@@ -71,7 +71,7 @@ export function GoogleSheetPanel(props: { org: string; upload: number }) {
         </Show>
       </div>
       <p class="mt-1 text-sm text-muted-foreground">
-        Sends every row of this statement to a tab in your own spreadsheet. Rows already in the tab (same id) get their type updated;
+        Sends every row of this statement to a tab in your own spreadsheet. Rows already in the tab (same id) get their category updated;
         the rest are added.
       </p>
 
@@ -295,7 +295,7 @@ function Pickers(props: { org: string; upload: number; onDisconnected: () => voi
               Sent {plural(r().parsed, "row", "rows")} to <span class="font-medium">{r().spreadsheet_title}</span> › {r().tab}:{" "}
               {plural(r().appended, "added", "added")}
               {", "}
-              {plural(r().updated, "type updated", "types updated")}
+              {plural(r().updated, "category updated", "categories updated")}
               <Show when={r().existing - r().updated > 0}>
                 {", "}
                 {r().existing - r().updated} left as they were

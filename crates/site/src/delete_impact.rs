@@ -66,7 +66,7 @@ fn label(table: &str) -> &'static str {
         "statement_upload_transactions" => "links between saved statements and rows",
         "statement_transaction_documents" => "documents attached to rows (the links only)",
         "statement_types" => "statement types",
-        "statement_type_rules" => "type rules",
+        "statement_type_rules" => "category rules",
         "users" => "accounts",
         "sessions" => "sign-in sessions",
         "roles" => "roles",

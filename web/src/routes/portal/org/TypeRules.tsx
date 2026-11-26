@@ -84,7 +84,7 @@ function RuleCard(props: {
                   size="sm"
                   class="mr-1 h-8"
                   onClick={() => apply()()}
-                  title="Set this rule's type on the rows already saved in this account"
+                  title="Set this rule's category on the rows already saved in this bank account"
                 >
                   <Play size={14} /> Apply now
                 </Button>
@@ -104,7 +104,7 @@ function RuleCard(props: {
       </div>
       <div class="mt-3 grid gap-3 md:grid-cols-[minmax(0,12rem)_minmax(0,1fr)]">
         <div class="flex flex-col gap-1.5">
-          <label for={id("type")} class="text-xs text-muted-foreground">Type</label>
+          <label for={id("type")} class="text-xs text-muted-foreground">Category</label>
           <select
             id={id("type")}
             value={selectValue(props.draft.type, props.types)}
@@ -113,7 +113,7 @@ function RuleCard(props: {
             class="h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
           >
             <option value="" disabled>
-              Choose a type
+              Choose a category
             </option>
             {/* A name that isn't on the list any more still shows, so it can be changed. */}
             <Show when={props.draft.type && props.types.length > 0 && !props.types.includes(props.draft.type)}>
@@ -248,7 +248,7 @@ function ApplyDialog(props: {
           {title()} to {props.account.name}
         </h2>
         <p class="text-sm text-muted-foreground">
-          These rows already saved in {props.account.name} would get a new type. Hand-set types aren't changed, and rows no rule
+          These rows already saved in {props.account.name} would get a new category. Hand-set categories aren't changed, and rows no rule
           matches keep theirs. Check them before accepting: there's no undo.
         </p>
 
@@ -263,7 +263,7 @@ function ApplyDialog(props: {
         <Show when={changes.state === "ready"}>
           <Show
             when={list().length > 0}
-            fallback={<p class="rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">Nothing would change: every row already has the type the rules give it.</p>}
+            fallback={<p class="rounded-lg bg-secondary/30 p-3 text-sm text-muted-foreground">Nothing would change: every row already has the category the rules give it.</p>}
           >
             <p class="text-sm font-medium">
               {list().length.toLocaleString()} {list().length === 1 ? "row" : "rows"} would change
@@ -275,8 +275,8 @@ function ApplyDialog(props: {
                     <th class="px-3 py-2 font-medium">Date</th>
                     <th class="px-3 py-2 font-medium">Description</th>
                     <th class="px-3 py-2 text-right font-medium">Amount</th>
-                    <th class="px-3 py-2 font-medium">Type now</th>
-                    <th class="px-3 py-2 font-medium">New type</th>
+                    <th class="px-3 py-2 font-medium">Category now</th>
+                    <th class="px-3 py-2 font-medium">New category</th>
                     <Show when={props.scope === "all"}>
                       <th class="px-3 py-2 font-medium">Rule</th>
                     </Show>
@@ -288,7 +288,7 @@ function ApplyDialog(props: {
                       <tr class="border-t border-border">
                         <td class="whitespace-nowrap px-3 py-1.5 tabular-nums">{formatDate(c.date)}</td>
                         <td class="px-3 py-1.5">{c.description}</td>
-                        <td class="whitespace-nowrap px-3 py-1.5 text-right tabular-nums">{formatAmount(c.amount)}</td>
+                        <td class="whitespace-nowrap px-3 py-1.5 text-right font-mono tabular-nums">{formatAmount(c.amount)}</td>
                         <td class="px-3 py-1.5 text-muted-foreground">{c.from ?? "—"}</td>
                         <td class="px-3 py-1.5 font-medium">{c.to}</td>
                         <Show when={props.scope === "all"}>
@@ -352,18 +352,18 @@ function TypesList(props: {
   };
   const add = async (e: SubmitEvent) => {
     e.preventDefault();
-    if (adding().trim() && (await run(() => createType(org.slug, adding()), "Couldn't add the type."))) setAdding("");
+    if (adding().trim() && (await run(() => createType(org.slug, adding()), "Couldn't add the category."))) setAdding("");
   };
   const rename = async (e: SubmitEvent, t: TypeInfo) => {
     e.preventDefault();
     const to = name().trim();
     if (!to || to === t.name) return setEditing(null);
-    if (await run(() => renameType(org.slug, t.id, to), "Couldn't rename the type.")) {
+    if (await run(() => renameType(org.slug, t.id, to), "Couldn't rename the category.")) {
       props.onRenamed(t.name, to);
       setEditing(null);
     }
   };
-  const remove = (t: TypeInfo) => run(() => deleteType(org.slug, t.id), "Couldn't delete the type.");
+  const remove = (t: TypeInfo) => run(() => deleteType(org.slug, t.id), "Couldn't delete the category.");
   const uses = (t: TypeInfo) =>
     [t.rows && `${t.rows} ${t.rows === 1 ? "row" : "rows"}`, t.rules && `${t.rules} ${t.rules === 1 ? "rule" : "rules"}`]
       .filter(Boolean)
@@ -371,17 +371,17 @@ function TypesList(props: {
 
   return (
     <section class="rounded-xl border border-border p-4">
-      <h2 class="text-sm font-medium">Types</h2>
+      <h2 class="text-sm font-medium">Categories</h2>
       <p class="mt-1 text-xs text-muted-foreground">
-        The types rows can have. Rules and the Transactions grid choose from this list. Renaming a type renames it on every row and rule.
+        The categories rows can have. Rules and the Transactions grid choose from this list. Renaming a category renames it on every row and rule.
       </p>
       <Show when={props.error}>
-        <p class="mt-3 text-sm text-red-500">{errorText(props.error, "Couldn't load the types.")}</p>
+        <p class="mt-3 text-sm text-red-500">{errorText(props.error, "Couldn't load the categories.")}</p>
       </Show>
       <Show when={props.types}>
         {(list) => (
           <ul class="mt-3 flex flex-wrap gap-2">
-            <For each={list()} fallback={<li class="text-sm text-muted-foreground">No types yet.</li>}>
+            <For each={list()} fallback={<li class="text-sm text-muted-foreground">No categories yet.</li>}>
               {(t) => (
                 <li class="flex items-center gap-1 rounded-full border border-border bg-secondary/30 py-0.5 pl-3 pr-1 text-sm">
                   <Show
@@ -443,9 +443,9 @@ function TypesList(props: {
             class="h-9"
             value={adding()}
             onInput={(e) => setAdding(e.currentTarget.value)}
-            placeholder="New type, e.g. FEES"
+            placeholder="New category, e.g. FEES"
             maxLength={100}
-            aria-label="New type"
+            aria-label="New category"
             disabled={busy()}
           />
           <Button type="submit" size="sm" variant="outline" disabled={busy() || !adding().trim()}>
@@ -521,7 +521,7 @@ function RulesEditor(props: { account: () => Account }) {
     setNotice(null);
     const untyped = missingType();
     if (untyped >= 0) {
-      setError(`Rule ${untyped + 1}: choose a type.`);
+      setError(`Rule ${untyped + 1}: choose a category.`);
       return;
     }
     const bad = invalidAmount();
@@ -535,7 +535,7 @@ function RulesEditor(props: { account: () => Account }) {
       mutate(data);
       setNotice("Saved. New and re-saved statements use these rules.");
     } catch (e) {
-      setError(errorText(e, "Couldn't save the type rules."));
+      setError(errorText(e, "Couldn't save the category rules."));
     } finally {
       setSaving(false);
     }
@@ -553,14 +553,14 @@ function RulesEditor(props: { account: () => Account }) {
 
       <p class="max-w-3xl text-sm text-muted-foreground">
         These rules belong to <span class="font-medium text-foreground">{props.account().name}</span>: they set each row's{" "}
-        <span class="font-medium text-foreground">type</span> when a statement is saved into this account. They're tried in order and
-        the first match wins. A row no rule matches keeps the type it already had. To apply saved rules to rows already saved, use{" "}
+        <span class="font-medium text-foreground">category</span> when a statement is saved into this bank account. They're tried in order and
+        the first match wins. A row no rule matches keeps the category it already had. To apply saved rules to rows already saved, use{" "}
         <span class="font-medium text-foreground">Apply now</span> on a rule (or Apply all rules): you see every row that would
-        change before anything does. The types themselves are shared by every account.
+        change before anything does. The categories themselves are shared by every bank account.
       </p>
 
       <Show when={loaded.error}>
-        <p class="text-sm text-red-500">{errorText(loaded.error, "Couldn't load the type rules.")}</p>
+        <p class="text-sm text-red-500">{errorText(loaded.error, "Couldn't load the category rules.")}</p>
       </Show>
 
       <Show when={settled(loaded)}>
@@ -570,7 +570,7 @@ function RulesEditor(props: { account: () => Account }) {
               when={drafts().length > 0}
               fallback={
                 <p class="rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
-                  No rules yet: every type is left blank.
+                  No rules yet: every category is left blank.
                 </p>
               }
             >
@@ -604,7 +604,7 @@ function RulesEditor(props: { account: () => Account }) {
                     size="sm"
                     onClick={() => setApplying("all")}
                     disabled={dirty()}
-                    title={dirty() ? "Save the rules first" : "Set the rules' types on the rows already saved in this account"}
+                    title={dirty() ? "Save the rules first" : "Set the rules' categories on the rows already saved in this bank account"}
                   >
                     <Play size={16} /> Apply all rules
                   </Button>
